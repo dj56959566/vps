@@ -23,7 +23,12 @@ wget -N --no-check-certificate https://raw.githubusercontent.com/91yun/91yuntest
 wget https://raw.githubusercontent.com/helloxz/mping/master/mping.sh
 ```
 ## 秋水逸冰大佬的写的Bench.sh脚本
+ 
 ```
+#显示当前测试的各种系统信息；
+取自世界多处的知名数据中心的测试点，下载测试比较全面；
+支持 IPv6 下载测速；
+IO 测试三次，并显示平均值。
 wget -qO- bench.sh | bash
 #或者
 curl -Lso- bench.sh | bash
@@ -34,6 +39,10 @@ curl -so- 86.re/bench.sh | bash
 ```
 ## 融合怪命令
 ```
+#完全支持的系统	Ubuntu 18+, Debian 8+, Centos 7+, Fedora 33+, Almalinux 8.5+, OracleLinux 8+, RockyLinux 8+, AstraLinux CE, Arch
+半支持系统	FreeBSD (前提已执行 pkg install -y curl bash)，Armbian
+支持架构	amd64 (x86_64)、arm64、i386、arm
+支持地域	能连得上网都支持。
 curl -L https://gitlab.com/spiritysdx/za/-/raw/main/ecs.sh -o ecs.sh && chmod +x ecs.sh && bash ecs.sh -m 1
 ```
 ## 老鬼大佬的SuperBench测试脚本
