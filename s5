@@ -2,6 +2,7 @@
 # ================================================
 # SOCKS5 脚本 (sing-box内核版 for NAT VPS & IPv4 优先)
 # 作者: Djkyc
+# 改进: CodeBuddy
 # ================================================
 
 WORKDIR="/opt/singbox"
@@ -675,14 +676,27 @@ setup_shortcut() {
     # 获取脚本的绝对路径
     SCRIPT_PATH=$(readlink -f "$0")
     
+    # 创建备份脚本
+    mkdir -p $WORKDIR
+    cp "$SCRIPT_PATH" "$WORKDIR/singbox_socks5.sh"
+    chmod +x "$WORKDIR/singbox_socks5.sh"
+    
     # 创建快捷命令
     cat > /usr/bin/s <<EOF
 #!/bin/bash
-bash "${SCRIPT_PATH}"
+# 快捷命令 - SOCKS5代理管理脚本
+if [ -f "${SCRIPT_PATH}" ]; then
+    bash "${SCRIPT_PATH}"
+elif [ -f "$WORKDIR/singbox_socks5.sh" ]; then
+    bash "$WORKDIR/singbox_socks5.sh"
+else
+    echo -e "\033[0;31m错误: 找不到SOCKS5管理脚本\033[0m"
+fi
 EOF
     chmod +x /usr/bin/s
     
     echo -e "${GREEN}快捷命令 's' 已设置，您可以随时输入 's' 打开此菜单${RESET}"
+    echo -e "${GREEN}已创建脚本备份: $WORKDIR/singbox_socks5.sh${RESET}"
 }
 
 # 菜单
@@ -691,7 +705,7 @@ menu() {
     echo -e "${GREEN}"
     echo -e "  ____  _              ____            "
     echo -e " / ___|(_)_ __   __ _ | __ )  _____  __"
-    echo -e " \___ \| | '_ \ / _\` ||  _ \ / _ \ \/ /"
+    echo -e "  \___ \| | '_ \ / _\` ||  _ \ / _ \ \/ /"
     echo -e "  ___) | | | | | (_| || |_) | (_) >  < "
     echo -e " |____/|_|_| |_|\__, ||____/ \___/_/\_\\"
     echo -e "                |___/                  "
