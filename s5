@@ -1,7 +1,7 @@
 #!/bin/bash
 # ================================================
 # SOCKS5 脚本 (sing-box内核版 for NAT VPS & IPv4 优先)
-# 作者: CodeBuddy
+# 作者: Djkyc
 # ================================================
 
 WORKDIR="/opt/singbox"
@@ -343,6 +343,9 @@ EOF
         
         # 系统优化
         optimize_sysctl
+        
+        # 设置快捷命令
+        setup_shortcut
     else
         echo -e "${RED}SOCKS5 安装失败，请检查日志: journalctl -u $SERVICE_NAME${RESET}"
     fi
@@ -632,710 +635,34 @@ EOF
     fi
 }
 
-# 菜单
-menu() {
-    clear
-    echo -e "${GREEN}"
-    echo "  ____  _              ____            "
-    echo " / ___|(_)_ __   __ _ | __ )  _____  __"
-    echo " \___ \| | '_ \ / _\` ||  _ \ / _ \ \/ /"
-    echo "  ___) | | | | | (_| || |_) | (_) >  < "
-    echo " |____/|_|_| |_|\__, ||____/ \___/_/\_\\"
-    echo "                |___/                  "
-    echo -e "SOCKS5 代理管理面板 v1.0 By:Djkyc      "
-    echo "===================================="
-    
-    # 检查是否已安装
-    if systemctl is-active --quiet $SERVICE_NAME; then
-        source $INFO_FILE
-        echo -e "${GREEN}状态: 运行中 - ${IP}:${PORT}${RESET}"
-    elif systemctl list-unit-files | grep -q $SERVICE_NAME; then
-        echo -e "${RED}状态: 已安装但未运行${RESET}"
-    else
-        echo -e "${YELLOW}状态: 未安装${RESET}"
-    fi
-    
-    # 检查当前DNS
-    CURRENT_DNS=$(grep "nameserver" /etc/resolv.conf | head -1 | awk '{print $2}')
-    if [[ "$CURRENT_DNS" == "1.1.1.1" ]]; then
-        DNS_STATUS="${GREEN}CloudFlare DNS${RESET}"
-    else
-        DNS_STATUS="${YELLOW}系统默认 ($CURRENT_DNS)${RESET}"
-    fi
-    echo -e "当前DNS: $DNS_STATUS"
-    
-    echo "===================================="
-    echo "1. 安装 SOCKS5 代理"
-    echo "2. 卸载 SOCKS5 代理"
-    echo "3. 查看代理状态"
-    echo "4. 重启代理服务"
-    echo "5. 查看代理日志"
-    echo "6. 修改代理配置"
-    echo "7. 检测/开启 BBR"
-    echo "8. 系统优化检测"
-    echo "9. 更换/恢复 DNS"
-    echo "10. 更新 sing-box"
-    echo "0. 退出"
-    echo "===================================="
-    echo -ne "${YELLOW}请输入选项: ${RESET}"
-    read choice
-    case $choice in
-        1) install_socks5 ;;
-        2) uninstall_socks5 ;;
-        3) check_status ;;
-        4) restart_socks5 ;;
-        5) view_logs ;;
-        6) change_config ;;
-        7) 
-           check_bbr
-           echo -ne "${YELLOW}是否启用 BBR? (y/n): ${RESET}"
-           read yn
-           if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-               enable_bbr
-           fi
-           ;;
-        8) optimize_sysctl ;;
-        9) 
-           # 检查当前DNS状态
-           if grep -q "1.1.1.1" /etc/resolv.conf; then
-               echo -e "${YELLOW}当前已使用CloudFlare DNS，是否恢复原始DNS? (y/n): ${RESET}"
-               read yn
-               if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-                   restore_original_dns
-               fi
-           else
-               echo -e "${YELLOW}是否更换为CloudFlare DNS? (y/n): ${RESET}"
-               read yn
-               if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-                   change_dns_to_cloudflare
-               fi
-           fi
-           ;;
-        10) update_singbox ;;
-        0) exit 0 ;;
-        *) echo -e "${RED}无效选项${RESET}" ;;
-    esac
-    echo
-    echo -ne "${GREEN}按回车键继续...${RESET}"
-    read
-    menu
-}
-
 # 设置快捷命令 s
-if [[ ! -f /usr/bin/s ]]; then
-    echo "#!/bin/bash" > /usr/bin/s
-    echo "bash $0" >> /usr/bin/s
+setup_shortcut() {
+    # 获取脚本的绝对路径
+    SCRIPT_PATH=$(readlink -f "$0")
+    
+    # 创建快捷命令
+    cat > /usr/bin/s <<EOF
+#!/bin/bash
+bash "${SCRIPT_PATH}"
+EOF
     chmod +x /usr/bin/s
-fi
-
-# 检查是否为root用户
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误: 此脚本必须以root用户运行${RESET}"
-    exit 1
-fi
-
-# 主程序入口
-menu
-# ================================================
-# SOCKS5 脚本 (sing-box内核版 for NAT VPS & IPv4 优先)
-# 作者: Djkyc 再次调出快捷命令 s
-# ================================================
-
-WORKDIR="/opt/singbox"
-SERVICE_NAME="singbox"
-INFO_FILE="$WORKDIR/info"
-CONFIG_FILE="$WORKDIR/config"
-SINGBOX_CONFIG="$WORKDIR/config.json"
-SINGBOX_VERSION="1.7.0" # 可以根据需要更新版本
-GREEN="\033[0;32m"
-YELLOW="\033[0;33m"
-RED="\033[0;31m"
-RESET="\033[0m"
-
-mkdir -p $WORKDIR
-
-# 随机端口生成，避免冲突
-gen_port() {
-    while :; do
-        PORT=$((RANDOM % 40000 + 10000))
-        if ! ss -tuln | grep -q ":$PORT "; then
-            echo $PORT
-            return
-        fi
-    done
-}
-
-# 随机用户名密码生成
-gen_credentials() {
-    # 确保配置目录存在
-    mkdir -p $WORKDIR
     
-    # 创建或清空配置文件
-    > $CONFIG_FILE
-    
-    # 生成随机凭据
-    USERNAME=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 8)
-    PASSWORD=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12)
-    
-    # 写入配置
-    echo "USERNAME=$USERNAME" >> $CONFIG_FILE
-    echo "PASSWORD=$PASSWORD" >> $CONFIG_FILE
-}
-
-# 检测 IPv4 优先
-get_public_ip() {
-    IPv4=$(curl -4 -s --connect-timeout 5 https://ipv4.icanhazip.com || curl -4 -s --connect-timeout 5 https://api.ipify.org)
-    IPv6=$(curl -6 -s --connect-timeout 5 https://ipv6.icanhazip.com || curl -6 -s --connect-timeout 5 https://api64.ipify.org)
-    if [[ -n "$IPv4" ]]; then
-        echo "$IPv4"
-    elif [[ -n "$IPv6" ]]; then
-        echo "$IPv6"
-    else
-        echo "无法获取公网IP"
-        return 1
-    fi
-}
-
-# 检测 NAT VPS 内存/CPU，推荐并发配置
-optimize_sysctl() {
-    MEM=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-    CPU_CORES=$(grep -c processor /proc/cpuinfo)
-    
-    # 根据内存和CPU核心数优化并发连接数
-    if [[ $MEM -lt 65536 ]]; then
-        MAX_CONN=50
-        RECOMMEND="建议并发 < 50"
-    elif [[ $MEM -lt 131072 ]]; then
-        MAX_CONN=100
-        RECOMMEND="建议并发 < 100"
-    elif [[ $MEM -lt 262144 ]]; then
-        MAX_CONN=200
-        RECOMMEND="建议并发 < 200"
-    else
-        MAX_CONN=500
-        RECOMMEND="建议并发 < 500"
-    fi
-    
-    # 系统参数优化
-    cat > /etc/sysctl.d/99-singbox-optimize.conf <<EOF
-# 增加打开文件数限制
-fs.file-max = 65535
-
-# 网络栈优化
-net.core.somaxconn = 4096
-net.core.netdev_max_backlog = 10000
-net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 300
-net.ipv4.tcp_keepalive_intvl = 30
-net.ipv4.tcp_keepalive_probes = 5
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.ip_local_port_range = 1024 65000
-EOF
-
-    sysctl -p /etc/sysctl.d/99-singbox-optimize.conf
-    
-    # 设置系统最大打开文件数
-    if ! grep -q "* soft nofile 65535" /etc/security/limits.conf; then
-        echo "* soft nofile 65535" >> /etc/security/limits.conf
-        echo "* hard nofile 65535" >> /etc/security/limits.conf
-    fi
-    
-    echo -e "${GREEN}[系统优化] 内存: $((MEM/1024))MB, CPU: ${CPU_CORES}核, ${RECOMMEND}${RESET}"
-    echo -e "${GREEN}[系统优化] 已优化系统参数，最大连接数设置为: ${MAX_CONN}${RESET}"
-    
-    # 更新配置文件
-    echo "MAX_CONN=$MAX_CONN" >> $CONFIG_FILE
-}
-
-# 检测是否启用 BBR
-check_bbr() {
-    if lsmod | grep -q bbr; then
-        echo -e "${GREEN}BBR 已启用${RESET}"
-        return 0
-    else
-        echo -e "${YELLOW}BBR 未启用，可在菜单选择开启${RESET}"
-        return 1
-    fi
-}
-
-enable_bbr() {
-    if check_bbr; then
-        echo -e "${GREEN}BBR 已经启用，无需再次开启${RESET}"
-        return
-    fi
-    
-    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    sysctl -p
-    
-    if lsmod | grep -q bbr; then
-        echo -e "${GREEN}BBR 已成功启用${RESET}"
-    else
-        echo -e "${YELLOW}BBR 启用配置已写入，请重启 VPS 生效${RESET}"
-    fi
-}
-
-# 安装依赖
-install_dependencies() {
-    echo -e "${GREEN}[安装] 正在安装必要依赖...${RESET}"
-    apt-get update -y
-    apt-get install -y curl wget unzip net-tools
-}
-
-# 下载并安装sing-box
-download_singbox() {
-    echo -e "${GREEN}[安装] 正在下载sing-box...${RESET}"
-    
-    # 检测系统架构
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64)
-            ARCH="amd64"
-            ;;
-        aarch64)
-            ARCH="arm64"
-            ;;
-        armv7l)
-            ARCH="armv7"
-            ;;
-        *)
-            echo -e "${RED}不支持的系统架构: $ARCH${RESET}"
-            return 1
-            ;;
-    esac
-    
-    # 下载sing-box
-    DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz"
-    wget -O /tmp/sing-box.tar.gz $DOWNLOAD_URL
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}下载sing-box失败，请检查网络连接或版本号${RESET}"
-        return 1
-    fi
-    
-    # 解压并安装
-    mkdir -p $WORKDIR/bin
-    tar -xzf /tmp/sing-box.tar.gz -C /tmp
-    mv /tmp/sing-box-${SINGBOX_VERSION}-linux-${ARCH}/sing-box $WORKDIR/bin/
-    chmod +x $WORKDIR/bin/sing-box
-    
-    # 清理临时文件
-    rm -rf /tmp/sing-box.tar.gz /tmp/sing-box-${SINGBOX_VERSION}-linux-${ARCH}
-    
-    # 验证安装
-    if [ -f "$WORKDIR/bin/sing-box" ]; then
-        echo -e "${GREEN}sing-box 安装成功${RESET}"
-        return 0
-    else
-        echo -e "${RED}sing-box 安装失败${RESET}"
-        return 1
-    fi
-}
-
-# 创建sing-box配置文件
-create_singbox_config() {
-    PORT=$1
-    USERNAME=$2
-    PASSWORD=$3
-    
-    cat > $SINGBOX_CONFIG <<EOF
-{
-  "log": {
-    "level": "info",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "socks",
-      "tag": "socks-in",
-      "listen": "::",
-      "listen_port": $PORT,
-      "users": [
-        {
-          "username": "$USERNAME",
-          "password": "$PASSWORD"
-        }
-      ],
-      "sniff": true,
-      "sniff_override_destination": false
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
-  ]
-}
-EOF
-}
-
-# 安装 SOCKS5
-install_socks5() {
-    # 检查是否已安装
-    if systemctl is-active --quiet $SERVICE_NAME; then
-        echo -e "${YELLOW}sing-box 已经安装并运行中，如需重新安装请先卸载${RESET}"
-        return
-    fi
-    
-    install_dependencies
-    
-    # 下载并安装sing-box
-    download_singbox
-    if [ $? -ne 0 ]; then
-        return
-    fi
-    
-    # 生成随机端口和认证信息
-    PORT=$(gen_port)
-    gen_credentials
-    source $CONFIG_FILE
-    
-    # 创建sing-box配置
-    create_singbox_config $PORT $USERNAME $PASSWORD
-    
-    # 创建系统服务
-    cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
-[Unit]
-Description=sing-box Service
-Documentation=https://sing-box.sagernet.org
-After=network.target nss-lookup.target
-
-[Service]
-ExecStart=$WORKDIR/bin/sing-box run -c $SINGBOX_CONFIG
-Restart=on-failure
-RestartSec=10s
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # 启动服务
-    systemctl daemon-reload
-    systemctl enable $SERVICE_NAME
-    systemctl restart $SERVICE_NAME
-    
-    # 等待服务启动
-    sleep 2
-    
-    # 检查服务状态
-    if systemctl is-active --quiet $SERVICE_NAME; then
-        # 保存连接信息
-        PUBIP=$(get_public_ip)
-        echo "IP=$PUBIP" > $INFO_FILE
-        echo "PORT=$PORT" >> $INFO_FILE
-        echo "USERNAME=$USERNAME" >> $INFO_FILE
-        echo "PASSWORD=$PASSWORD" >> $INFO_FILE
-        echo "INSTALL_DATE=$(date '+%Y-%m-%d %H:%M:%S')" >> $INFO_FILE
-        
-        echo -e "${GREEN}========================================${RESET}"
-        echo -e "${GREEN}SOCKS5 代理安装成功!${RESET}"
-        echo -e "${GREEN}----------------------------------------${RESET}"
-        echo -e "${GREEN}服务器地址: ${PUBIP}${RESET}"
-        echo -e "${GREEN}端口: ${PORT}${RESET}"
-        echo -e "${GREEN}用户名: ${USERNAME}${RESET}"
-        echo -e "${GREEN}密码: ${PASSWORD}${RESET}"
-        echo -e "${GREEN}----------------------------------------${RESET}"
-        echo -e "${GREEN}连接字符串: socks5://${USERNAME}:${PASSWORD}@${PUBIP}:${PORT}${RESET}"
-        echo -e "${GREEN}========================================${RESET}"
-        
-        # 系统优化
-        optimize_sysctl
-    else
-        echo -e "${RED}SOCKS5 安装失败，请检查日志: journalctl -u $SERVICE_NAME${RESET}"
-    fi
-}
-
-# 卸载 SOCKS5
-uninstall_socks5() {
-    echo -e "${YELLOW}正在卸载 sing-box...${RESET}"
-    
-    systemctl stop $SERVICE_NAME 2>/dev/null
-    systemctl disable $SERVICE_NAME 2>/dev/null
-    rm -f /etc/systemd/system/$SERVICE_NAME.service
-    systemctl daemon-reload
-    
-    # 删除优化配置
-    rm -f /etc/sysctl.d/99-singbox-optimize.conf
-    
-    # 删除工作目录
-    rm -rf $WORKDIR
-    
-    # 删除快捷命令
-    rm -f /usr/bin/sb
-    
-    echo -e "${GREEN}sing-box 已完全卸载${RESET}"
-}
-
-# 查看状态
-check_status() {
-    if [[ -f $INFO_FILE ]]; then
-        source $INFO_FILE
-        source $CONFIG_FILE 2>/dev/null
-        
-        echo -e "${GREEN}========================================${RESET}"
-        echo -e "${GREEN}SOCKS5 代理状态 (sing-box)${RESET}"
-        echo -e "${GREEN}----------------------------------------${RESET}"
-        
-        if systemctl is-active --quiet $SERVICE_NAME; then
-            echo -e "${GREEN}运行状态: 正在运行${RESET}"
-            
-            # 显示连接信息
-            echo -e "${GREEN}服务器地址: ${IP}${RESET}"
-            echo -e "${GREEN}端口: ${PORT}${RESET}"
-            echo -e "${GREEN}用户名: ${USERNAME}${RESET}"
-            echo -e "${GREEN}密码: ${PASSWORD}${RESET}"
-            echo -e "${GREEN}安装日期: ${INSTALL_DATE:-未知}${RESET}"
-            
-            # 显示sing-box版本
-            CURRENT_VERSION=$($WORKDIR/bin/sing-box version | grep "sing-box version" | awk '{print $3}')
-            echo -e "${GREEN}sing-box 版本: ${CURRENT_VERSION}${RESET}"
-            
-            # 显示系统负载
-            LOAD=$(uptime | awk -F'load average:' '{print $2}' | sed 's/,//g')
-            echo -e "${GREEN}系统负载: ${LOAD}${RESET}"
-            
-            # 显示内存使用
-            MEM_USED=$(free -m | awk 'NR==2{printf "%.2f%%", $3*100/$2}')
-            echo -e "${GREEN}内存使用率: ${MEM_USED}${RESET}"
-            
-            echo -e "${GREEN}----------------------------------------${RESET}"
-            echo -e "${GREEN}连接字符串: socks5://${USERNAME}:${PASSWORD}@${IP}:${PORT}${RESET}"
-        else
-            echo -e "${RED}运行状态: 未运行${RESET}"
-            echo -e "${YELLOW}请使用 '重启服务' 选项启动服务${RESET}"
-        fi
-        
-        echo -e "${GREEN}========================================${RESET}"
-    else
-        echo -e "${RED}sing-box 未安装或配置文件丢失${RESET}"
-    fi
-}
-
-# 重启服务
-restart_socks5() {
-    if systemctl list-unit-files | grep -q $SERVICE_NAME; then
-        systemctl restart $SERVICE_NAME
-        sleep 2
-        
-        if systemctl is-active --quiet $SERVICE_NAME; then
-            echo -e "${GREEN}sing-box 服务已成功重启${RESET}"
-        else
-            echo -e "${RED}sing-box 服务重启失败，请检查日志: journalctl -u $SERVICE_NAME${RESET}"
-        fi
-    else
-        echo -e "${RED}sing-box 服务未安装${RESET}"
-    fi
-}
-
-# 查看日志
-view_logs() {
-    echo -e "${GREEN}显示最近 50 行日志:${RESET}"
-    journalctl -u $SERVICE_NAME -n 50 --no-pager
-}
-
-# 修改配置
-change_config() {
-    if [[ ! -f $INFO_FILE ]]; then
-        echo -e "${RED}sing-box 未安装或配置文件丢失${RESET}"
-        return
-    fi
-    
-    source $INFO_FILE
-    source $CONFIG_FILE 2>/dev/null
-    
-    echo -e "${GREEN}当前配置:${RESET}"
-    echo -e "${GREEN}1. 端口: ${PORT}${RESET}"
-    echo -e "${GREEN}2. 用户名: ${USERNAME}${RESET}"
-    echo -e "${GREEN}3. 密码: ${PASSWORD}${RESET}"
-    echo -e "${GREEN}4. 返回${RESET}"
-    
-    echo -ne "${YELLOW}请选择要修改的选项: ${RESET}"
-    read config_choice
-    
-    case $config_choice in
-        1)
-            echo -ne "${YELLOW}请输入新端口 (10000-70000): ${RESET}"
-            read new_port
-            if [[ $new_port =~ ^[0-9]+$ ]] && [[ $new_port -ge 10000 ]] && [[ $new_port -le 50000 ]]; then
-                sed -i "s/PORT=.*/PORT=$new_port/" $INFO_FILE
-                # 更新sing-box配置
-                create_singbox_config $new_port $USERNAME $PASSWORD
-                echo -e "${GREEN}端口已修改为 ${new_port}${RESET}"
-                restart_socks5
-            else
-                echo -e "${RED}无效的端口号${RESET}"
-            fi
-            ;;
-        2)
-            echo -ne "${YELLOW}请输入新用户名: ${RESET}"
-            read new_username
-            if [[ -n "$new_username" ]]; then
-                sed -i "s/USERNAME=.*/USERNAME=$new_username/" $INFO_FILE
-                sed -i "s/USERNAME=.*/USERNAME=$new_username/" $CONFIG_FILE
-                # 更新sing-box配置
-                create_singbox_config $PORT $new_username $PASSWORD
-                echo -e "${GREEN}用户名已修改为 ${new_username}${RESET}"
-                restart_socks5
-            else
-                echo -e "${RED}用户名不能为空${RESET}"
-            fi
-            ;;
-        3)
-            echo -ne "${YELLOW}请输入新密码: ${RESET}"
-            read new_password
-            if [[ -n "$new_password" ]]; then
-                sed -i "s/PASSWORD=.*/PASSWORD=$new_password/" $INFO_FILE
-                sed -i "s/PASSWORD=.*/PASSWORD=$new_password/" $CONFIG_FILE
-                # 更新sing-box配置
-                create_singbox_config $PORT $USERNAME $new_password
-                echo -e "${GREEN}密码已修改为 ${new_password}${RESET}"
-                restart_socks5
-            else
-                echo -e "${RED}密码不能为空${RESET}"
-            fi
-            ;;
-        4)
-            return
-            ;;
-        *)
-            echo -e "${RED}无效选项${RESET}"
-            ;;
-    esac
-}
-
-# 更新sing-box
-update_singbox() {
-    echo -e "${GREEN}正在检查sing-box更新...${RESET}"
-    
-    # 获取当前版本
-    if [[ -f "$WORKDIR/bin/sing-box" ]]; then
-        CURRENT_VERSION=$($WORKDIR/bin/sing-box version | grep "sing-box version" | awk '{print $3}')
-        echo -e "${GREEN}当前版本: ${CURRENT_VERSION}${RESET}"
-    else
-        echo -e "${RED}sing-box未安装${RESET}"
-        return
-    fi
-    
-    # 获取最新版本
-    LATEST_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": "v[^"]*' | cut -d'"' -f4 | cut -c 2-)
-    
-    if [[ -z "$LATEST_VERSION" ]]; then
-        echo -e "${RED}无法获取最新版本信息${RESET}"
-        return
-    fi
-    
-    echo -e "${GREEN}最新版本: ${LATEST_VERSION}${RESET}"
-    
-    # 比较版本
-    if [[ "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
-        echo -e "${GREEN}已经是最新版本${RESET}"
-        return
-    fi
-    
-    echo -ne "${YELLOW}是否更新到最新版本? (y/n): ${RESET}"
-    read update_choice
-    
-    if [[ "$update_choice" != "y" && "$update_choice" != "Y" ]]; then
-        echo -e "${YELLOW}取消更新${RESET}"
-        return
-    fi
-    
-    # 停止服务
-    systemctl stop $SERVICE_NAME
-    
-    # 备份当前配置
-    cp $SINGBOX_CONFIG $SINGBOX_CONFIG.bak
-    
-    # 更新SINGBOX_VERSION变量
-    SINGBOX_VERSION=$LATEST_VERSION
-    
-    # 下载并安装新版本
-    download_singbox
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}更新失败，恢复原配置${RESET}"
-        mv $SINGBOX_CONFIG.bak $SINGBOX_CONFIG
-        systemctl start $SERVICE_NAME
-        return
-    fi
-    
-    # 启动服务
-    systemctl start $SERVICE_NAME
-    
-    # 检查服务状态
-    if systemctl is-active --quiet $SERVICE_NAME; then
-        echo -e "${GREEN}sing-box 已成功更新到 ${LATEST_VERSION}${RESET}"
-        rm -f $SINGBOX_CONFIG.bak
-    else
-        echo -e "${RED}更新后服务启动失败，恢复原配置${RESET}"
-        mv $SINGBOX_CONFIG.bak $SINGBOX_CONFIG
-        systemctl start $SERVICE_NAME
-    fi
-}
-
-# 更换DNS为CloudFlare DNS
-change_dns_to_cloudflare() {
-    echo -e "${GREEN}正在更换系统DNS为CloudFlare DNS...${RESET}"
-    
-    # 备份当前的resolv.conf
-    if [[ -f /etc/resolv.conf ]]; then
-        cp /etc/resolv.conf /etc/resolv.conf.bak
-    fi
-    
-    # 写入CloudFlare DNS
-    cat > /etc/resolv.conf <<EOF
-nameserver 1.1.1.1
-nameserver 1.0.0.1
-options timeout:2 attempts:3 rotate single-request-reopen
-EOF
-    
-    # 防止自动覆盖
-    chattr +i /etc/resolv.conf 2>/dev/null
-    
-    # 检查是否成功
-    if grep -q "1.1.1.1" /etc/resolv.conf; then
-        echo -e "${GREEN}DNS已成功更换为CloudFlare DNS (1.1.1.1 和 1.0.0.1)${RESET}"
-    else
-        echo -e "${RED}DNS更换失败，请手动检查${RESET}"
-    fi
-}
-
-# 恢复原始DNS
-restore_original_dns() {
-    echo -e "${GREEN}正在恢复原始DNS设置...${RESET}"
-    
-    # 解除文件锁定
-    chattr -i /etc/resolv.conf 2>/dev/null
-    
-    # 恢复备份
-    if [[ -f /etc/resolv.conf.bak ]]; then
-        mv /etc/resolv.conf.bak /etc/resolv.conf
-        echo -e "${GREEN}已恢复原始DNS设置${RESET}"
-    else
-        echo -e "${YELLOW}未找到DNS备份，将使用默认设置${RESET}"
-        cat > /etc/resolv.conf <<EOF
-nameserver 8.8.8.8
-nameserver 8.8.4.4
-EOF
-    fi
+    echo -e "${GREEN}快捷命令 's' 已设置，您可以随时输入 's' 打开此菜单${RESET}"
 }
 
 # 菜单
 menu() {
     clear
     echo -e "${GREEN}"
-    echo "  ____  _              ____            "
-    echo " / ___|(_)_ __   __ _ | __ )  _____  __"
-    echo " \___ \| | '_ \ / _\` ||  _ \ / _ \ \/ /"
-    echo "  ___) | | | | | (_| || |_) | (_) >  < "
-    echo " |____/|_|_| |_|\__, ||____/ \___/_/\_\\"
-    echo "                |___/                  "
-    echo -e "       SOCKS5 代理管理面板 v1.0      "
+    echo -e "  ____  _              ____            "
+    echo -e " / ___|(_)_ __   __ _ | __ )  _____  __"
+    echo -e " \___ \| | '_ \ / _\` ||  _ \ / _ \ \/ /"
+    echo -e "  ___) | | | | | (_| || |_) | (_) >  < "
+    echo -e " |____/|_|_| |_|\__, ||____/ \___/_/\_\\"
+    echo -e "                |___/                  "
+    echo -e "  SOCKS5 代理管理面板 v1.0 By:Djkyc     "
     echo -e "     快捷命令: 输入 ${YELLOW}s${GREEN} 打开此菜单     "
-    echo "===================================="
+    echo -e "===================================="
     
     # 检查是否已安装
     if systemctl is-active --quiet $SERVICE_NAME; then
@@ -1356,68 +683,66 @@ menu() {
     fi
     echo -e "当前DNS: $DNS_STATUS"
     
-    echo "===================================="
-    echo "1. 安装 SOCKS5 代理"
-    echo "2. 卸载 SOCKS5 代理"
-    echo "3. 查看代理状态"
-    echo "4. 重启代理服务"
-    echo "5. 查看代理日志"
-    echo "6. 修改代理配置"
-    echo "7. 检测/开启 BBR"
-    echo "8. 系统优化检测"
-    echo "9. 更换/恢复 DNS"
-    echo "10. 更新 sing-box"
-    echo "0. 退出"
-    echo "===================================="
-    echo -ne "${YELLOW}请输入选项: ${RESET}"
-    read choice
-    case $choice in
-        1) install_socks5 ;;
-        2) uninstall_socks5 ;;
-        3) check_status ;;
-        4) restart_socks5 ;;
-        5) view_logs ;;
-        6) change_config ;;
-        7) 
-           check_bbr
-           echo -ne "${YELLOW}是否启用 BBR? (y/n): ${RESET}"
+    echo -e "===================================="
+    echo -e "${GREEN}1. 安装 SOCKS5 代理${RESET}"
+    echo -e "${GREEN}2. 卸载 SOCKS5 代理${RESET}"
+    echo -e "${GREEN}3. 查看代理状态${RESET}"
+    echo -e "${GREEN}4. 重启代理服务${RESET}"
+    echo -e "${GREEN}5. 查看代理日志${RESET}"
+    echo -e "${GREEN}6. 修改代理配置${RESET}"
+    echo -e "${GREEN}7. 检测/开启 BBR${RESET}"
+    echo -e "${GREEN}8. 系统优化检测${RESET}"
+    echo -e "${GREEN}9. 更换/恢复 DNS${RESET}"
+echo -e "${GREEN}10. 更新 sing-box${RESET}"
+echo -e "${GREEN}0. 退出${RESET}"
+echo -e "${GREEN}====================================${RESET}"
+echo -ne "${YELLOW}请输入选项: ${RESET}"
+read choice
+case $choice in
+    1) install_socks5 ;;
+    2) uninstall_socks5 ;;
+    3) check_status ;;
+    4) restart_socks5 ;;
+    5) view_logs ;;
+    6) change_config ;;
+    7) 
+       check_bbr
+       echo -ne "${YELLOW}是否启用 BBR? (y/n): ${RESET}"
+       read yn
+       if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+           enable_bbr
+       fi
+       ;;
+    8) optimize_sysctl ;;
+    9) 
+       # 检查当前DNS状态
+       if grep -q "1.1.1.1" /etc/resolv.conf; then
+           echo -e "${YELLOW}当前已使用CloudFlare DNS，是否恢复原始DNS? (y/n): ${RESET}"
            read yn
            if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-               enable_bbr
+               restore_original_dns
            fi
-           ;;
-        8) optimize_sysctl ;;
-        9) 
-           # 检查当前DNS状态
-           if grep -q "1.1.1.1" /etc/resolv.conf; then
-               echo -e "${YELLOW}当前已使用CloudFlare DNS，是否恢复原始DNS? (y/n): ${RESET}"
-               read yn
-               if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-                   restore_original_dns
-               fi
-           else
-               echo -e "${YELLOW}是否更换为CloudFlare DNS? (y/n): ${RESET}"
-               read yn
-               if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-                   change_dns_to_cloudflare
-               fi
+       else
+           echo -e "${YELLOW}是否更换为CloudFlare DNS? (y/n): ${RESET}"
+           read yn
+           if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+               change_dns_to_cloudflare
            fi
-           ;;
-        10) update_singbox ;;
-        0) exit 0 ;;
-        *) echo -e "${RED}无效选项${RESET}" ;;
-    esac
-    echo
-    echo -ne "${GREEN}按回车键继续...${RESET}"
-    read
-    menu
+       fi
+       ;;
+    10) update_singbox ;;
+    0) exit 0 ;;
+    *) echo -e "${RED}无效选项${RESET}" ;;
+esac
+echo
+echo -ne "${GREEN}按回车键继续...${RESET}"
+read
+menu
 }
 
-# 设置快捷命令 sb
-if [[ ! -f /usr/bin/sb ]]; then
-    echo "#!/bin/bash" > /usr/bin/sb
-    echo "bash $0" >> /usr/bin/sb
-    chmod +x /usr/bin/sb
+# 安装时设置快捷命令
+if [[ ! -f /usr/bin/s ]]; then
+    setup_shortcut
 fi
 
 # 检查是否为root用户
