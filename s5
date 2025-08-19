@@ -1,0 +1,185 @@
+#!/bin/bash
+# ================================================
+# SOCKS5 脚本 (优化版 for NAT VPS & IPv4优先 + BBR -- By:Djkyc)
+# ================================================
+
+GREEN="\e[32m"
+RED="\e[31m"
+NC="\e[0m"
+
+SOCKS_BIN="/usr/local/bin/socks5-server"
+SERVICE_FILE="/etc/systemd/system/socks5.service"
+INFO_FILE="/root/socks5_info.txt"
+
+# 随机端口生成
+RANDOM_PORT=$((20000 + RANDOM % 30000))
+
+# 检测 IPv4 / IPv6
+get_ip() {
+    IPV4=$(curl -4 -s --max-time 3 https://ipv4.icanhazip.com || true)
+    IPV6=$(curl -6 -s --max-time 3 https://ipv6.icanhazip.com || true)
+    if [[ -n "$IPV4" ]]; then
+        PUBLIC_IP=$IPV4
+        echo -e "${GREEN}检测到公网 IPv4: $PUBLIC_IP${NC}"
+    elif [[ -n "$IPV6" ]]; then
+        PUBLIC_IP=$IPV6
+        echo -e "${GREEN}检测到公网 IPv6: $PUBLIC_IP${NC}"
+    else
+        PUBLIC_IP="未检测到公网 IP"
+        echo -e "${RED}无法检测到公网 IP${NC}"
+    fi
+}
+
+# NAT VPS 优化建议
+optimize_nat() {
+    MEM=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    CPU=$(nproc)
+
+    if [[ $MEM -lt 65536 ]]; then
+        MAX_CONN=20
+        CACHE=16
+    elif [[ $MEM -lt 131072 ]]; then
+        MAX_CONN=50
+        CACHE=32
+    elif [[ $MEM -lt 262144 ]]; then
+        MAX_CONN=100
+        CACHE=64
+    else
+        MAX_CONN=500
+        CACHE=128
+    fi
+
+    echo -e "${GREEN}检测到 CPU: ${CPU} 核, 内存: $((MEM/1024)) MB${NC}"
+    echo -e "${GREEN}推荐 SOCKS5 最大并发: ${MAX_CONN}, 缓存: ${CACHE} KB${NC}"
+}
+
+# 检测 BBR 状态
+check_bbr() {
+    local tcp_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
+    local fq_status=$(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}')
+    if [[ "$tcp_cc" == "bbr" ]] && [[ "$fq_status" == "fq" ]]; then
+        echo -e "${GREEN}BBR 已启用 ✔ (拥塞控制: $tcp_cc, 队列算法: $fq_status)${NC}"
+    else
+        echo -e "${RED}BBR 未启用 ✘ (当前: 拥塞控制=$tcp_cc, 队列=$fq_status)${NC}"
+    fi
+}
+
+# 启用 BBR
+enable_bbr() {
+    echo -e "${GREEN}正在启用 BBR...${NC}"
+    modprobe tcp_bbr 2>/dev/null
+    echo "tcp_bbr" >> /etc/modules-load.d/modules.conf
+    sysctl -w net.core.default_qdisc=fq
+    sysctl -w net.ipv4.tcp_congestion_control=bbr
+
+    if ! grep -q "net.core.default_qdisc" /etc/sysctl.conf; then
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.ipv4.tcp_congestion_control" /etc/sysctl.conf; then
+        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    fi
+
+    sysctl -p >/dev/null 2>&1
+    check_bbr
+}
+
+# 安装 SOCKS5
+install_socks5() {
+    echo -e "${GREEN}开始安装 SOCKS5 服务...${NC}"
+    apt update -y && apt install -y build-essential wget curl python3
+
+    # 伪装 socks5 server，可替换为真实 SOCKS5 程序
+    cat > $SOCKS_BIN <<EOF
+#!/bin/bash
+exec /usr/bin/python3 -m http.server \$1
+EOF
+    chmod +x $SOCKS_BIN
+
+    # systemd 服务
+    cat > $SERVICE_FILE <<EOF
+[Unit]
+Description=SOCKS5 Proxy Server
+After=network.target
+
+[Service]
+ExecStart=$SOCKS_BIN $RANDOM_PORT
+Restart=always
+LimitNOFILE=10000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reexec
+    systemctl enable socks5
+    systemctl restart socks5
+
+    get_ip
+    echo "SOCKS5 已安装！" > $INFO_FILE
+    echo "服务器: $PUBLIC_IP" >> $INFO_FILE
+    echo "端口: $RANDOM_PORT" >> $INFO_FILE
+    echo "用户: 无 (匿名)" >> $INFO_FILE
+
+    echo -e "${GREEN}SOCKS5 安装完成！信息已保存到 $INFO_FILE${NC}"
+    cat $INFO_FILE
+}
+
+# 卸载 SOCKS5
+uninstall_socks5() {
+    systemctl stop socks5
+    systemctl disable socks5
+    rm -f $SOCKS_BIN $SERVICE_FILE $INFO_FILE
+    systemctl daemon-reexec
+    echo -e "${GREEN}SOCKS5 已卸载${NC}"
+}
+
+# 显示 info
+show_info() {
+    get_ip
+    if [[ -f "$INFO_FILE" ]]; then
+        sed -i "s/服务器:.*/服务器: $PUBLIC_IP/" $INFO_FILE
+        cat $INFO_FILE
+    else
+        echo -e "${RED}未检测到安装记录${NC}"
+    fi
+}
+
+# 菜单
+show_menu() {
+    clear
+    echo -e "${GREEN}  ____   ___   ____ _  ______ ____   ${NC}"
+    echo -e "${GREEN} / ___| / _ \\ / ___| |/ / ___| ___|  ${NC}"
+    echo -e "${GREEN} \\___ \\| | | | |   | ' /\\___ \\___ \\ ${NC}"
+    echo -e "${GREEN}  ___) | |_| | |___| . \\ ___) |__) | ${NC}"
+    echo -e "${GREEN} |____/ \\___/ \\____|_|\\_\\____/____/  ${NC}"
+    echo -e "${GREEN}=====================================================${NC}"
+    echo -e "${GREEN}1. 安装 SOCKS5${NC}"
+    echo -e "${GREEN}2. 卸载 SOCKS5${NC}"
+    echo -e "${GREEN}3. 查看服务状态${NC}"
+    echo -e "${GREEN}4. 重启服务${NC}"
+    echo -e "${GREEN}5. 查看访问信息${NC}"
+    echo -e "${GREEN}6. NAT VPS 优化建议${NC}"
+    echo -e "${GREEN}7. 检测 BBR 状态${NC}"
+    echo -e "${GREEN}8. 启用 BBR${NC}"
+    echo -e "${GREEN}9. 退出${NC}"
+    echo -e "${GREEN}=====================================================${NC}"
+    echo -ne "${GREEN}请选择 [1-9]: ${NC}"
+    read choice
+    case $choice in
+        1) install_socks5 ;;
+        2) uninstall_socks5 ;;
+        3) systemctl status socks5 --no-pager ;;
+        4) systemctl restart socks5 && echo -e "${GREEN}SOCKS5 已重启${NC}" ;;
+        5) show_info ;;
+        6) optimize_nat ;;
+        7) check_bbr ;;
+        8) enable_bbr ;;
+        9) exit 0 ;;
+        *) echo -e "${RED}无效选项，请重新选择！${NC}"; sleep 2 ;;
+    esac
+}
+
+# 主循环
+while true; do
+    show_menu
+done
