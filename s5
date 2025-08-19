@@ -251,7 +251,7 @@ install_socks5() {
     fi
     
     # 设置端口
-    echo -ne "${YELLOW}请输入端口号 (10000-60000，回车使用随机端口): ${RESET}"
+    echo -ne "${YELLOW}请输入端口号 (10000-70000，回车使用随机端口): ${RESET}"
     read PORT_INPUT
     if [[ -z "$PORT_INPUT" ]]; then
         PORT=$(gen_port)
