@@ -518,6 +518,41 @@ change_config() {
     esac
 }
 
+# 更新脚本
+update_script() {
+    echo -e "${GREEN}正在检查脚本更新...${RESET}"
+    
+    # 获取脚本的绝对路径
+    SCRIPT_PATH=$(readlink -f "$0")
+    
+    # 创建备份
+    cp "$SCRIPT_PATH" "${SCRIPT_PATH}.bak"
+    echo -e "${GREEN}已创建脚本备份: ${SCRIPT_PATH}.bak${RESET}"
+    
+    # 从GitHub获取最新版本
+    echo -e "${GREEN}正在从GitHub下载最新版本...${RESET}"
+    TEMP_SCRIPT="/tmp/singbox_socks5_new.sh"
+    
+    if curl -s -o "$TEMP_SCRIPT" https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5.sh; then
+        # 检查下载是否成功
+        if [[ -s "$TEMP_SCRIPT" ]]; then
+            # 替换当前脚本
+            cat "$TEMP_SCRIPT" > "$SCRIPT_PATH"
+            chmod +x "$SCRIPT_PATH"
+            rm -f "$TEMP_SCRIPT"
+            echo -e "${GREEN}脚本已更新成功！将在下次启动时生效${RESET}"
+            echo -e "${GREEN}如需立即应用更新，请退出后重新运行脚本${RESET}"
+        else
+            echo -e "${RED}下载的脚本内容为空，更新失败${RESET}"
+            echo -e "${YELLOW}恢复备份中...${RESET}"
+            cp "${SCRIPT_PATH}.bak" "$SCRIPT_PATH"
+        fi
+    else
+        echo -e "${RED}下载失败，无法连接到GitHub${RESET}"
+        echo -e "${YELLOW}您可以手动下载最新版本: https://github.com/djkcyl/socks5-script${RESET}"
+    fi
+}
+
 # 更新sing-box
 update_singbox() {
     echo -e "${GREEN}正在检查sing-box更新...${RESET}"
@@ -674,81 +709,49 @@ menu() {
         echo -e "${YELLOW}状态: 未安装${RESET}"
     fi
     
-    # 检查当前DNS
-    CURRENT_DNS=$(grep "nameserver" /etc/resolv.conf | head -1 | awk '{print $2}')
-    if [[ "$CURRENT_DNS" == "1.1.1.1" ]]; then
-        DNS_STATUS="${GREEN}CloudFlare DNS${RESET}"
-    else
-        DNS_STATUS="${YELLOW}系统默认 ($CURRENT_DNS)${RESET}"
-    fi
-    echo -e "当前DNS: $DNS_STATUS"
-    
-    echo -e "===================================="
-    echo -e "${GREEN}1. 安装 SOCKS5 代理${RESET}"
-    echo -e "${GREEN}2. 卸载 SOCKS5 代理${RESET}"
-    echo -e "${GREEN}3. 查看代理状态${RESET}"
-    echo -e "${GREEN}4. 重启代理服务${RESET}"
-    echo -e "${GREEN}5. 查看代理日志${RESET}"
-    echo -e "${GREEN}6. 修改代理配置${RESET}"
-    echo -e "${GREEN}7. 检测/开启 BBR${RESET}"
-    echo -e "${GREEN}8. 系统优化检测${RESET}"
-    echo -e "${GREEN}9. 更换/恢复 DNS${RESET}"
-echo -e "${GREEN}10. 更新 sing-box${RESET}"
-echo -e "${GREEN}0. 退出${RESET}"
-echo -e "${GREEN}====================================${RESET}"
-echo -ne "${YELLOW}请输入选项: ${RESET}"
-read choice
-case $choice in
-    1) install_socks5 ;;
-    2) uninstall_socks5 ;;
-    3) check_status ;;
-    4) restart_socks5 ;;
-    5) view_logs ;;
-    6) change_config ;;
-    7) 
-       check_bbr
-       echo -ne "${YELLOW}是否启用 BBR? (y/n): ${RESET}"
-       read yn
-       if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-           enable_bbr
-       fi
-       ;;
-    8) optimize_sysctl ;;
-    9) 
-       # 检查当前DNS状态
-       if grep -q "1.1.1.1" /etc/resolv.conf; then
-           echo -e "${YELLOW}当前已使用CloudFlare DNS，是否恢复原始DNS? (y/n): ${RESET}"
-           read yn
-           if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-               restore_original_dns
-           fi
-       else
-           echo -e "${YELLOW}是否更换为CloudFlare DNS? (y/n): ${RESET}"
-           read yn
-           if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-               change_dns_to_cloudflare
-           fi
-       fi
-       ;;
-    10) update_singbox ;;
-    0) exit 0 ;;
-    *) echo -e "${RED}无效选项${RESET}" ;;
-esac
-echo
-echo -ne "${GREEN}按回车键继续...${RESET}"
-read
-menu
+    echo "===================================="
+    echo "1. 安装 SOCKS5 代理"
+    echo "2. 卸载 SOCKS5 代理"
+    echo "3. 查看代理状态"
+    echo "4. 重启代理服务"
+    echo "5. 查看代理日志"
+    echo "6. 修改代理配置"
+    echo "7. 更新 sing-box"
+    echo "8. 更新脚本"
+    echo "9. 检测/开启 BBR"
+    echo "10. 系统优化检测"
+    echo "11. 更换DNS (CloudFlare)"
+    echo "12. 恢复原始DNS"
+    echo "13. 退出"
+    echo
+
+    echo -ne "${YELLOW}请输入选项: ${RESET}"
+    read choice
+    case $choice in
+        1) install_socks5 ;;
+        2) uninstall_socks5 ;;
+        3) check_status ;;
+        4) restart_socks5 ;;
+        5) view_logs ;;
+        6) change_config ;;
+        7) update_singbox ;;
+        8) update_script ;;
+        9) check_bbr; echo -ne "${YELLOW}是否启用 BBR? (y/n): ${RESET}"; read yn; [[ $yn == y || $yn == Y ]] && enable_bbr ;;
+        10) optimize_sysctl ;;
+        11) change_dns_to_cloudflare ;;
+        12) restore_original_dns ;;
+        13) exit 0 ;;
+        *) echo -e "${RED}无效选项${RESET}" ;;
+    esac
+    echo
+    echo -ne "${GREEN}按回车继续...${RESET}"
+    read
+    menu
 }
 
-# 安装时设置快捷命令
+# 设置快捷命令 s (如果不存在)
 if [[ ! -f /usr/bin/s ]]; then
     setup_shortcut
-fi
-
-# 检查是否为root用户
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误: 此脚本必须以root用户运行${RESET}"
-    exit 1
 fi
 
 # 主程序入口
