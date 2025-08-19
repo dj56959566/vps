@@ -251,12 +251,12 @@ install_socks5() {
     fi
     
     # 设置端口
-    echo -ne "${YELLOW}请输入端口号 (10000-70000，回车使用随机端口): ${RESET}"
+    echo -ne "${YELLOW}请输入端口号 (10000-65535，回车使用随机端口): ${RESET}"
     read PORT_INPUT
     if [[ -z "$PORT_INPUT" ]]; then
         PORT=$(gen_port)
         echo -e "${GREEN}使用随机端口: ${PORT}${RESET}"
-    elif [[ $PORT_INPUT =~ ^[0-9]+$ ]] && [[ $PORT_INPUT -ge 10000 ]] && [[ $PORT_INPUT -le 60000 ]]; then
+    elif [[ $PORT_INPUT =~ ^[0-9]+$ ]] && [[ $PORT_INPUT -ge 10000 ]] && [[ $PORT_INPUT -le 65535 ]]; then
         PORT=$PORT_INPUT
         echo -e "${GREEN}使用指定端口: ${PORT}${RESET}"
     else
@@ -337,6 +337,8 @@ EOF
         echo -e "${GREEN}密码: ${PASSWORD}${RESET}"
         echo -e "${GREEN}----------------------------------------${RESET}"
         echo -e "${GREEN}连接字符串: socks5://${USERNAME}:${PASSWORD}@${PUBIP}:${PORT}${RESET}"
+        echo -e "${GREEN}----------------------------------------${RESET}"
+        echo -e "${GREEN}快捷命令: 输入 ${YELLOW}s${GREEN} 可随时打开此管理菜单${RESET}"
         echo -e "${GREEN}========================================${RESET}"
         
         # 系统优化
@@ -362,7 +364,7 @@ uninstall_socks5() {
     rm -rf $WORKDIR
     
     # 删除快捷命令
-    rm -f /usr/bin/sb
+    rm -f /usr/bin/s
     
     echo -e "${GREEN}sing-box 已完全卸载${RESET}"
 }
@@ -455,12 +457,12 @@ change_config() {
     
     case $config_choice in
         1)
-            echo -ne "${YELLOW}请输入新端口 (10000-60000，回车使用随机端口): ${RESET}"
+            echo -ne "${YELLOW}请输入新端口 (10000-65535，回车使用随机端口): ${RESET}"
             read new_port
             if [[ -z "$new_port" ]]; then
                 new_port=$(gen_port)
                 echo -e "${GREEN}使用随机端口: ${new_port}${RESET}"
-            elif [[ $new_port =~ ^[0-9]+$ ]] && [[ $new_port -ge 10000 ]] && [[ $new_port -le 60000 ]]; then
+            elif [[ $new_port =~ ^[0-9]+$ ]] && [[ $new_port -ge 10000 ]] && [[ $new_port -le 65535 ]]; then
                 echo -e "${GREEN}使用指定端口: ${new_port}${RESET}"
             else
                 echo -e "${RED}无效的端口号，使用随机端口${RESET}"
@@ -719,11 +721,11 @@ menu() {
     menu
 }
 
-# 设置快捷命令 sb
-if [[ ! -f /usr/bin/sb ]]; then
-    echo "#!/bin/bash" > /usr/bin/sb
-    echo "bash $0" >> /usr/bin/sb
-    chmod +x /usr/bin/sb
+# 设置快捷命令 s
+if [[ ! -f /usr/bin/s ]]; then
+    echo "#!/bin/bash" > /usr/bin/s
+    echo "bash $0" >> /usr/bin/s
+    chmod +x /usr/bin/s
 fi
 
 # 检查是否为root用户
@@ -736,7 +738,7 @@ fi
 menu
 # ================================================
 # SOCKS5 脚本 (sing-box内核版 for NAT VPS & IPv4 优先)
-# 作者: CodeBuddy
+# 作者: Djkyc 再次调出快捷命令 s
 # ================================================
 
 WORKDIR="/opt/singbox"
@@ -1155,7 +1157,7 @@ change_config() {
     
     case $config_choice in
         1)
-            echo -ne "${YELLOW}请输入新端口 (10000-50000): ${RESET}"
+            echo -ne "${YELLOW}请输入新端口 (10000-70000): ${RESET}"
             read new_port
             if [[ $new_port =~ ^[0-9]+$ ]] && [[ $new_port -ge 10000 ]] && [[ $new_port -le 50000 ]]; then
                 sed -i "s/PORT=.*/PORT=$new_port/" $INFO_FILE
@@ -1332,6 +1334,7 @@ menu() {
     echo " |____/|_|_| |_|\__, ||____/ \___/_/\_\\"
     echo "                |___/                  "
     echo -e "       SOCKS5 代理管理面板 v1.0      "
+    echo -e "     快捷命令: 输入 ${YELLOW}s${GREEN} 打开此菜单     "
     echo "===================================="
     
     # 检查是否已安装
