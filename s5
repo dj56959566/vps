@@ -250,10 +250,45 @@ install_socks5() {
         return
     fi
     
-    # 生成随机端口和认证信息
-    PORT=$(gen_port)
-    gen_credentials
-    source $CONFIG_FILE
+    # 设置端口
+    echo -ne "${YELLOW}请输入端口号 (10000-60000，回车使用随机端口): ${RESET}"
+    read PORT_INPUT
+    if [[ -z "$PORT_INPUT" ]]; then
+        PORT=$(gen_port)
+        echo -e "${GREEN}使用随机端口: ${PORT}${RESET}"
+    elif [[ $PORT_INPUT =~ ^[0-9]+$ ]] && [[ $PORT_INPUT -ge 10000 ]] && [[ $PORT_INPUT -le 60000 ]]; then
+        PORT=$PORT_INPUT
+        echo -e "${GREEN}使用指定端口: ${PORT}${RESET}"
+    else
+        echo -e "${RED}无效的端口号，使用随机端口${RESET}"
+        PORT=$(gen_port)
+        echo -e "${GREEN}使用随机端口: ${PORT}${RESET}"
+    fi
+    
+    # 设置用户名
+    echo -ne "${YELLOW}请输入用户名 (回车使用随机用户名): ${RESET}"
+    read USERNAME_INPUT
+    if [[ -z "$USERNAME_INPUT" ]]; then
+        USERNAME=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 8)
+        echo -e "${GREEN}使用随机用户名: ${USERNAME}${RESET}"
+    else
+        USERNAME=$USERNAME_INPUT
+    fi
+    
+    # 设置密码
+    echo -ne "${YELLOW}请输入密码 (回车使用随机密码): ${RESET}"
+    read PASSWORD_INPUT
+    if [[ -z "$PASSWORD_INPUT" ]]; then
+        PASSWORD=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12)
+        echo -e "${GREEN}使用随机密码: ${PASSWORD}${RESET}"
+    else
+        PASSWORD=$PASSWORD_INPUT
+    fi
+    
+    # 创建配置文件
+    mkdir -p $WORKDIR
+    echo "USERNAME=$USERNAME" > $CONFIG_FILE
+    echo "PASSWORD=$PASSWORD" >> $CONFIG_FILE
     
     # 创建sing-box配置
     create_singbox_config $PORT $USERNAME $PASSWORD
@@ -420,45 +455,54 @@ change_config() {
     
     case $config_choice in
         1)
-            echo -ne "${YELLOW}请输入新端口 (10000-50000): ${RESET}"
+            echo -ne "${YELLOW}请输入新端口 (10000-60000，回车使用随机端口): ${RESET}"
             read new_port
-            if [[ $new_port =~ ^[0-9]+$ ]] && [[ $new_port -ge 10000 ]] && [[ $new_port -le 50000 ]]; then
-                sed -i "s/PORT=.*/PORT=$new_port/" $INFO_FILE
-                # 更新sing-box配置
-                create_singbox_config $new_port $USERNAME $PASSWORD
-                echo -e "${GREEN}端口已修改为 ${new_port}${RESET}"
-                restart_socks5
+            if [[ -z "$new_port" ]]; then
+                new_port=$(gen_port)
+                echo -e "${GREEN}使用随机端口: ${new_port}${RESET}"
+            elif [[ $new_port =~ ^[0-9]+$ ]] && [[ $new_port -ge 10000 ]] && [[ $new_port -le 60000 ]]; then
+                echo -e "${GREEN}使用指定端口: ${new_port}${RESET}"
             else
-                echo -e "${RED}无效的端口号${RESET}"
+                echo -e "${RED}无效的端口号，使用随机端口${RESET}"
+                new_port=$(gen_port)
+                echo -e "${GREEN}使用随机端口: ${new_port}${RESET}"
             fi
+            
+            sed -i "s/PORT=.*/PORT=$new_port/" $INFO_FILE
+            # 更新sing-box配置
+            create_singbox_config $new_port $USERNAME $PASSWORD
+            echo -e "${GREEN}端口已修改为 ${new_port}${RESET}"
+            restart_socks5
             ;;
         2)
-            echo -ne "${YELLOW}请输入新用户名: ${RESET}"
+            echo -ne "${YELLOW}请输入新用户名 (回车使用随机用户名): ${RESET}"
             read new_username
-            if [[ -n "$new_username" ]]; then
-                sed -i "s/USERNAME=.*/USERNAME=$new_username/" $INFO_FILE
-                sed -i "s/USERNAME=.*/USERNAME=$new_username/" $CONFIG_FILE
-                # 更新sing-box配置
-                create_singbox_config $PORT $new_username $PASSWORD
-                echo -e "${GREEN}用户名已修改为 ${new_username}${RESET}"
-                restart_socks5
-            else
-                echo -e "${RED}用户名不能为空${RESET}"
+            if [[ -z "$new_username" ]]; then
+                new_username=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 8)
+                echo -e "${GREEN}使用随机用户名: ${new_username}${RESET}"
             fi
+            
+            sed -i "s/USERNAME=.*/USERNAME=$new_username/" $INFO_FILE
+            sed -i "s/USERNAME=.*/USERNAME=$new_username/" $CONFIG_FILE
+            # 更新sing-box配置
+            create_singbox_config $PORT $new_username $PASSWORD
+            echo -e "${GREEN}用户名已修改为 ${new_username}${RESET}"
+            restart_socks5
             ;;
         3)
-            echo -ne "${YELLOW}请输入新密码: ${RESET}"
+            echo -ne "${YELLOW}请输入新密码 (回车使用随机密码): ${RESET}"
             read new_password
-            if [[ -n "$new_password" ]]; then
-                sed -i "s/PASSWORD=.*/PASSWORD=$new_password/" $INFO_FILE
-                sed -i "s/PASSWORD=.*/PASSWORD=$new_password/" $CONFIG_FILE
-                # 更新sing-box配置
-                create_singbox_config $PORT $USERNAME $new_password
-                echo -e "${GREEN}密码已修改为 ${new_password}${RESET}"
-                restart_socks5
-            else
-                echo -e "${RED}密码不能为空${RESET}"
+            if [[ -z "$new_password" ]]; then
+                new_password=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12)
+                echo -e "${GREEN}使用随机密码: ${new_password}${RESET}"
             fi
+            
+            sed -i "s/PASSWORD=.*/PASSWORD=$new_password/" $INFO_FILE
+            sed -i "s/PASSWORD=.*/PASSWORD=$new_password/" $CONFIG_FILE
+            # 更新sing-box配置
+            create_singbox_config $PORT $USERNAME $new_password
+            echo -e "${GREEN}密码已修改为 ${new_password}${RESET}"
+            restart_socks5
             ;;
         4)
             return
@@ -596,7 +640,7 @@ menu() {
     echo "  ___) | | | | | (_| || |_) | (_) >  < "
     echo " |____/|_|_| |_|\__, ||____/ \___/_/\_\\"
     echo "                |___/                  "
-    echo -e "       SOCKS5 代理管理面板 v1.0      "
+    echo -e "SOCKS5 代理管理面板 v1.0 By:Djkyc      "
     echo "===================================="
     
     # 检查是否已安装
