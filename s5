@@ -1,185 +1,696 @@
 #!/bin/bash
 # ================================================
-# SOCKS5 脚本 (优化版 for NAT VPS & IPv4优先 + BBR -- By:Djkyc)
+# SOCKS5 脚本 (优化版 for NAT VPS & IPv4 优先)
+# 原作者: Djkyc
+# 改进版本: CodeBuddy
 # ================================================
 
-GREEN="\e[32m"
-RED="\e[31m"
-NC="\e[0m"
+WORKDIR="/opt/socks5"
+SERVICE_NAME="socks5"
+INFO_FILE="$WORKDIR/info"
+CONFIG_FILE="$WORKDIR/config"
+GREEN="\033[0;32m"
+YELLOW="\033[0;33m"
+RED="\033[0;31m"
+RESET="\033[0m"
 
-SOCKS_BIN="/usr/local/bin/socks5-server"
-SERVICE_FILE="/etc/systemd/system/socks5.service"
-INFO_FILE="/root/socks5_info.txt"
+mkdir -p $WORKDIR
 
-# 随机端口生成
-RANDOM_PORT=$((20000 + RANDOM % 30000))
+# 随机端口生成，避免冲突
+gen_port() {
+    while :; do
+        PORT=$((RANDOM % 40000 + 10000))
+        if ! ss -tuln | grep -q ":$PORT "; then
+            echo $PORT
+            return
+        fi
+    done
+}
 
-# 检测 IPv4 / IPv6
-get_ip() {
-    IPV4=$(curl -4 -s --max-time 3 https://ipv4.icanhazip.com || true)
-    IPV6=$(curl -6 -s --max-time 3 https://ipv6.icanhazip.com || true)
-    if [[ -n "$IPV4" ]]; then
-        PUBLIC_IP=$IPV4
-        echo -e "${GREEN}检测到公网 IPv4: $PUBLIC_IP${NC}"
-    elif [[ -n "$IPV6" ]]; then
-        PUBLIC_IP=$IPV6
-        echo -e "${GREEN}检测到公网 IPv6: $PUBLIC_IP${NC}"
+# 随机用户名密码生成
+gen_credentials() {
+    USERNAME=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 8)
+    PASSWORD=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12)
+    echo "USERNAME=$USERNAME" > $CONFIG_FILE
+    echo "PASSWORD=$PASSWORD" >> $CONFIG_FILE
+}
+
+# 检测 IPv4 优先
+get_public_ip() {
+    IPv4=$(curl -4 -s --connect-timeout 5 https://ipv4.icanhazip.com || curl -4 -s --connect-timeout 5 https://api.ipify.org)
+    IPv6=$(curl -6 -s --connect-timeout 5 https://ipv6.icanhazip.com || curl -6 -s --connect-timeout 5 https://api64.ipify.org)
+    if [[ -n "$IPv4" ]]; then
+        echo "$IPv4"
+    elif [[ -n "$IPv6" ]]; then
+        echo "$IPv6"
     else
-        PUBLIC_IP="未检测到公网 IP"
-        echo -e "${RED}无法检测到公网 IP${NC}"
+        echo "无法获取公网IP"
+        return 1
     fi
 }
 
-# NAT VPS 优化建议
-optimize_nat() {
-    MEM=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    CPU=$(nproc)
-
+# 检测 NAT VPS 内存/CPU，推荐并发配置
+optimize_sysctl() {
+    MEM=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    CPU_CORES=$(grep -c processor /proc/cpuinfo)
+    
+    # 根据内存和CPU核心数优化并发连接数
     if [[ $MEM -lt 65536 ]]; then
-        MAX_CONN=20
-        CACHE=16
-    elif [[ $MEM -lt 131072 ]]; then
         MAX_CONN=50
-        CACHE=32
-    elif [[ $MEM -lt 262144 ]]; then
+        RECOMMEND="建议并发 < 50"
+    elif [[ $MEM -lt 131072 ]]; then
         MAX_CONN=100
-        CACHE=64
+        RECOMMEND="建议并发 < 100"
+    elif [[ $MEM -lt 262144 ]]; then
+        MAX_CONN=200
+        RECOMMEND="建议并发 < 200"
     else
         MAX_CONN=500
-        CACHE=128
+        RECOMMEND="建议并发 < 500"
     fi
+    
+    # 系统参数优化
+    cat > /etc/sysctl.d/99-socks5-optimize.conf <<EOF
+# 增加打开文件数限制
+fs.file-max = 65535
 
-    echo -e "${GREEN}检测到 CPU: ${CPU} 核, 内存: $((MEM/1024)) MB${NC}"
-    echo -e "${GREEN}推荐 SOCKS5 最大并发: ${MAX_CONN}, 缓存: ${CACHE} KB${NC}"
+# 网络栈优化
+net.core.somaxconn = 4096
+net.core.netdev_max_backlog = 10000
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65000
+EOF
+
+    sysctl -p /etc/sysctl.d/99-socks5-optimize.conf
+    
+    # 设置系统最大打开文件数
+    if ! grep -q "* soft nofile 65535" /etc/security/limits.conf; then
+        echo "* soft nofile 65535" >> /etc/security/limits.conf
+        echo "* hard nofile 65535" >> /etc/security/limits.conf
+    fi
+    
+    echo -e "${GREEN}[系统优化] 内存: $((MEM/1024))MB, CPU: ${CPU_CORES}核, ${RECOMMEND}${RESET}"
+    echo -e "${GREEN}[系统优化] 已优化系统参数，最大连接数设置为: ${MAX_CONN}${RESET}"
+    
+    # 更新配置文件
+    echo "MAX_CONN=$MAX_CONN" >> $CONFIG_FILE
 }
 
-# 检测 BBR 状态
+# 检测是否启用 BBR
 check_bbr() {
-    local tcp_cc=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | awk '{print $3}')
-    local fq_status=$(sysctl net.core.default_qdisc 2>/dev/null | awk '{print $3}')
-    if [[ "$tcp_cc" == "bbr" ]] && [[ "$fq_status" == "fq" ]]; then
-        echo -e "${GREEN}BBR 已启用 ✔ (拥塞控制: $tcp_cc, 队列算法: $fq_status)${NC}"
+    if lsmod | grep -q bbr; then
+        echo -e "${GREEN}BBR 已启用${RESET}"
+        return 0
     else
-        echo -e "${RED}BBR 未启用 ✘ (当前: 拥塞控制=$tcp_cc, 队列=$fq_status)${NC}"
+        echo -e "${YELLOW}BBR 未启用，可在菜单选择开启${RESET}"
+        return 1
     fi
 }
 
-# 启用 BBR
 enable_bbr() {
-    echo -e "${GREEN}正在启用 BBR...${NC}"
-    modprobe tcp_bbr 2>/dev/null
-    echo "tcp_bbr" >> /etc/modules-load.d/modules.conf
-    sysctl -w net.core.default_qdisc=fq
-    sysctl -w net.ipv4.tcp_congestion_control=bbr
-
-    if ! grep -q "net.core.default_qdisc" /etc/sysctl.conf; then
-        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    if check_bbr; then
+        echo -e "${GREEN}BBR 已经启用，无需再次开启${RESET}"
+        return
     fi
-    if ! grep -q "net.ipv4.tcp_congestion_control" /etc/sysctl.conf; then
-        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+    
+    if lsmod | grep -q bbr; then
+        echo -e "${GREEN}BBR 已成功启用${RESET}"
+    else
+        echo -e "${YELLOW}BBR 启用配置已写入，请重启 VPS 生效${RESET}"
     fi
+}
 
-    sysctl -p >/dev/null 2>&1
-    check_bbr
+# 安装依赖
+install_dependencies() {
+    echo -e "${GREEN}[安装] 正在安装必要依赖...${RESET}"
+    apt-get update -y
+    apt-get install -y python3 python3-pip curl net-tools
+    pip3 install --upgrade pip
+    pip3 install pysocks
 }
 
 # 安装 SOCKS5
 install_socks5() {
-    echo -e "${GREEN}开始安装 SOCKS5 服务...${NC}"
-    apt update -y && apt install -y build-essential wget curl python3
+    # 检查是否已安装
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        echo -e "${YELLOW}SOCKS5 已经安装并运行中，如需重新安装请先卸载${RESET}"
+        return
+    fi
+    
+    install_dependencies
+    
+    # 生成随机端口和认证信息
+    PORT=$(gen_port)
+    gen_credentials
+    source $CONFIG_FILE
+    
+    # 创建改进版的SOCKS5服务器脚本
+    cat > $WORKDIR/socks5.py <<EOF
+#!/usr/bin/env python3
+import socket
+import threading
+import select
+import sys
+import logging
+import time
+import os
+from base64 import b64decode
 
-    # 伪装 socks5 server，可替换为真实 SOCKS5 程序
-    cat > $SOCKS_BIN <<EOF
-#!/bin/bash
-exec /usr/bin/python3 -m http.server \$1
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("$WORKDIR/socks5.log"),
+        logging.StreamHandler()
+    ]
+)
+
+# 认证信息
+USERNAME = "$USERNAME"
+PASSWORD = "$PASSWORD"
+MAX_CONN = $MAX_CONN
+
+# 全局变量
+active_connections = 0
+connection_lock = threading.Lock()
+
+def increment_connection():
+    global active_connections
+    with connection_lock:
+        active_connections += 1
+        return active_connections
+
+def decrement_connection():
+    global active_connections
+    with connection_lock:
+        active_connections -= 1
+        return active_connections
+
+def handle_client(client_conn, client_addr):
+    try:
+        # 检查是否超过最大连接数
+        conn_count = increment_connection()
+        if conn_count > MAX_CONN:
+            logging.warning(f"超过最大连接数 {MAX_CONN}，拒绝来自 {client_addr} 的连接")
+            client_conn.close()
+            decrement_connection()
+            return
+            
+        logging.info(f"新连接来自 {client_addr} (当前连接数: {conn_count}/{MAX_CONN})")
+        
+        # 接收客户端握手
+        data = client_conn.recv(262)
+        if not data or len(data) < 2:
+            raise Exception("握手数据无效")
+            
+        # 检查SOCKS版本
+        if data[0] != 5:
+            raise Exception(f"不支持的SOCKS版本: {data[0]}")
+            
+        # 检查认证方法
+        methods_count = data[1]
+        methods = data[2:2+methods_count]
+        
+        # 要求用户名/密码认证 (方法 0x02)
+        client_conn.send(b"\\x05\\x02")
+        
+        # 处理认证
+        auth_data = client_conn.recv(1024)
+        if not auth_data or len(auth_data) < 2:
+            raise Exception("认证数据无效")
+            
+        if auth_data[0] != 1:  # 认证版本
+            raise Exception(f"不支持的认证版本: {auth_data[0]}")
+            
+        # 解析用户名和密码
+        ulen = auth_data[1]
+        username = auth_data[2:2+ulen].decode('utf-8')
+        plen = auth_data[2+ulen]
+        password = auth_data[3+ulen:3+ulen+plen].decode('utf-8')
+        
+        # 验证用户名和密码
+        if username != USERNAME or password != PASSWORD:
+            logging.warning(f"认证失败: {client_addr}")
+            client_conn.send(b"\\x01\\x01")  # 认证失败
+            raise Exception("认证失败")
+            
+        # 认证成功
+        client_conn.send(b"\\x01\\x00")
+        
+        # 接收连接请求
+        request = client_conn.recv(4)
+        if not request or len(request) < 4:
+            raise Exception("请求数据无效")
+            
+        # 检查SOCKS版本和命令
+        if request[0] != 5:
+            raise Exception(f"无效的SOCKS版本: {request[0]}")
+            
+        command = request[1]
+        if command != 1:  # 仅支持CONNECT命令
+            client_conn.send(b"\\x05\\x07\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00")  # 命令不支持
+            raise Exception(f"不支持的命令: {command}")
+            
+        # 解析目标地址
+        atyp = request[3]
+        if atyp == 1:  # IPv4
+            addr_bytes = client_conn.recv(4)
+            addr = socket.inet_ntoa(addr_bytes)
+        elif atyp == 3:  # 域名
+            addr_len = client_conn.recv(1)[0]
+            addr_bytes = client_conn.recv(addr_len)
+            addr = addr_bytes.decode('utf-8')
+        elif atyp == 4:  # IPv6
+            addr_bytes = client_conn.recv(16)
+            addr = socket.inet_ntop(socket.AF_INET6, addr_bytes)
+        else:
+            client_conn.send(b"\\x05\\x08\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00")  # 地址类型不支持
+            raise Exception(f"不支持的地址类型: {atyp}")
+            
+        # 解析端口
+        port_bytes = client_conn.recv(2)
+        port = int.from_bytes(port_bytes, 'big')
+        
+        logging.info(f"连接请求: {addr}:{port}")
+        
+        try:
+            # 连接到目标服务器
+            if atyp == 4:  # IPv6
+                remote = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            else:  # IPv4 或域名
+                remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                
+            remote.settimeout(10)  # 设置连接超时
+            remote.connect((addr, port))
+            remote.settimeout(None)  # 恢复为阻塞模式
+            
+            # 发送成功响应
+            bind_addr = remote.getsockname()[0]
+            bind_port = remote.getsockname()[1]
+            
+            if ':' in bind_addr:  # IPv6
+                client_conn.send(b"\\x05\\x00\\x00\\x04" + socket.inet_pton(socket.AF_INET6, bind_addr) + bind_port.to_bytes(2, 'big'))
+            else:  # IPv4
+                client_conn.send(b"\\x05\\x00\\x00\\x01" + socket.inet_aton(bind_addr) + bind_port.to_bytes(2, 'big'))
+                
+            # 开始数据转发
+            exchange_loop(client_conn, remote)
+            
+        except Exception as e:
+            # 连接目标服务器失败
+            client_conn.send(b"\\x05\\x04\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00")  # 主机不可达
+            logging.error(f"连接到 {addr}:{port} 失败: {str(e)}")
+            
+    except Exception as e:
+        logging.error(f"处理客户端 {client_addr} 时出错: {str(e)}")
+    finally:
+        try:
+            client_conn.close()
+        except:
+            pass
+        decrement_connection()
+        logging.info(f"连接关闭 {client_addr} (当前连接数: {active_connections}/{MAX_CONN})")
+
+def exchange_loop(client, remote):
+    client_to_remote = threading.Thread(target=forward_data, args=(client, remote))
+    remote_to_client = threading.Thread(target=forward_data, args=(remote, client))
+    
+    client_to_remote.daemon = True
+    remote_to_client.daemon = True
+    
+    client_to_remote.start()
+    remote_to_client.start()
+    
+    # 等待任一线程结束
+    client_to_remote.join()
+    remote_to_client.join()
+
+def forward_data(source, destination):
+    try:
+        source.settimeout(60)  # 设置60秒超时
+        while True:
+            try:
+                data = source.recv(8192)
+                if not data:
+                    break
+                destination.sendall(data)
+            except socket.timeout:
+                # 检查连接是否仍然有效
+                try:
+                    source.sendall(b'')
+                    destination.sendall(b'')
+                except:
+                    break
+    except:
+        pass
+    finally:
+        try:
+            source.close()
+            destination.close()
+        except:
+            pass
+
+def start_server(host, port):
+    try:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((host, port))
+        server.listen(100)  # 最大挂起连接数
+        
+        logging.info(f"SOCKS5 服务器启动在 {host}:{port}")
+        logging.info(f"最大并发连接数: {MAX_CONN}")
+        
+        while True:
+            client_conn, client_addr = server.accept()
+            client_thread = threading.Thread(target=handle_client, args=(client_conn, client_addr))
+            client_thread.daemon = True
+            client_thread.start()
+            
+    except Exception as e:
+        logging.error(f"服务器错误: {str(e)}")
+    finally:
+        try:
+            server.close()
+        except:
+            pass
+
+if __name__ == "__main__":
+    try:
+        logging.info("SOCKS5 服务启动中...")
+        logging.info(f"认证信息 - 用户名: {USERNAME}, 密码: {PASSWORD}")
+        start_server("0.0.0.0", $PORT)
+    except KeyboardInterrupt:
+        logging.info("服务器关闭")
+        sys.exit(0)
 EOF
-    chmod +x $SOCKS_BIN
 
-    # systemd 服务
-    cat > $SERVICE_FILE <<EOF
+    # 创建系统服务
+    cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
 [Unit]
-Description=SOCKS5 Proxy Server
+Description=SOCKS5 Proxy Service
 After=network.target
 
 [Service]
-ExecStart=$SOCKS_BIN $RANDOM_PORT
+ExecStart=/usr/bin/python3 $WORKDIR/socks5.py
 Restart=always
-LimitNOFILE=10000
+User=root
+WorkingDirectory=$WORKDIR
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reexec
-    systemctl enable socks5
-    systemctl restart socks5
-
-    get_ip
-    echo "SOCKS5 已安装！" > $INFO_FILE
-    echo "服务器: $PUBLIC_IP" >> $INFO_FILE
-    echo "端口: $RANDOM_PORT" >> $INFO_FILE
-    echo "用户: 无 (匿名)" >> $INFO_FILE
-
-    echo -e "${GREEN}SOCKS5 安装完成！信息已保存到 $INFO_FILE${NC}"
-    cat $INFO_FILE
+    # 设置权限
+    chmod +x $WORKDIR/socks5.py
+    
+    # 启动服务
+    systemctl daemon-reload
+    systemctl enable $SERVICE_NAME
+    systemctl restart $SERVICE_NAME
+    
+    # 等待服务启动
+    sleep 2
+    
+    # 检查服务状态
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        # 保存连接信息
+        PUBIP=$(get_public_ip)
+        echo "IP=$PUBIP" > $INFO_FILE
+        echo "PORT=$PORT" >> $INFO_FILE
+        echo "USERNAME=$USERNAME" >> $INFO_FILE
+        echo "PASSWORD=$PASSWORD" >> $INFO_FILE
+        echo "INSTALL_DATE=$(date '+%Y-%m-%d %H:%M:%S')" >> $INFO_FILE
+        
+        echo -e "${GREEN}========================================${RESET}"
+        echo -e "${GREEN}SOCKS5 代理安装成功!${RESET}"
+        echo -e "${GREEN}----------------------------------------${RESET}"
+        echo -e "${GREEN}服务器地址: ${PUBIP}${RESET}"
+        echo -e "${GREEN}端口: ${PORT}${RESET}"
+        echo -e "${GREEN}用户名: ${USERNAME}${RESET}"
+        echo -e "${GREEN}密码: ${PASSWORD}${RESET}"
+        echo -e "${GREEN}----------------------------------------${RESET}"
+        echo -e "${GREEN}连接字符串: socks5://${USERNAME}:${PASSWORD}@${PUBIP}:${PORT}${RESET}"
+        echo -e "${GREEN}========================================${RESET}"
+        
+        # 系统优化
+        optimize_sysctl
+    else
+        echo -e "${RED}SOCKS5 安装失败，请检查日志: $WORKDIR/socks5.log${RESET}"
+    fi
 }
 
 # 卸载 SOCKS5
 uninstall_socks5() {
-    systemctl stop socks5
-    systemctl disable socks5
-    rm -f $SOCKS_BIN $SERVICE_FILE $INFO_FILE
-    systemctl daemon-reexec
-    echo -e "${GREEN}SOCKS5 已卸载${NC}"
+    echo -e "${YELLOW}正在卸载 SOCKS5...${RESET}"
+    
+    systemctl stop $SERVICE_NAME 2>/dev/null
+    systemctl disable $SERVICE_NAME 2>/dev/null
+    rm -f /etc/systemd/system/$SERVICE_NAME.service
+    systemctl daemon-reload
+    
+    # 删除优化配置
+    rm -f /etc/sysctl.d/99-socks5-optimize.conf
+    
+    # 删除工作目录
+    rm -rf $WORKDIR
+    
+    # 删除快捷命令
+    rm -f /usr/bin/s5
+    
+    echo -e "${GREEN}SOCKS5 已完全卸载${RESET}"
 }
 
-# 显示 info
-show_info() {
-    get_ip
-    if [[ -f "$INFO_FILE" ]]; then
-        sed -i "s/服务器:.*/服务器: $PUBLIC_IP/" $INFO_FILE
-        cat $INFO_FILE
+# 查看状态
+check_status() {
+    if [[ -f $INFO_FILE ]]; then
+        source $INFO_FILE
+        source $CONFIG_FILE 2>/dev/null
+        
+        echo -e "${GREEN}========================================${RESET}"
+        echo -e "${GREEN}SOCKS5 代理状态${RESET}"
+        echo -e "${GREEN}----------------------------------------${RESET}"
+        
+        if systemctl is-active --quiet $SERVICE_NAME; then
+            echo -e "${GREEN}运行状态: 正在运行${RESET}"
+            
+            # 显示连接信息
+            echo -e "${GREEN}服务器地址: ${IP}${RESET}"
+            echo -e "${GREEN}端口: ${PORT}${RESET}"
+            echo -e "${GREEN}用户名: ${USERNAME}${RESET}"
+            echo -e "${GREEN}密码: ${PASSWORD}${RESET}"
+            echo -e "${GREEN}安装日期: ${INSTALL_DATE:-未知}${RESET}"
+            
+            # 显示当前连接数
+            CONN_COUNT=$(ps aux | grep -v grep | grep -c socks5.py)
+            echo -e "${GREEN}当前进程数: ${CONN_COUNT}${RESET}"
+            
+            # 显示系统负载
+            LOAD=$(uptime | awk -F'load average:' '{print $2}' | sed 's/,//g')
+            echo -e "${GREEN}系统负载: ${LOAD}${RESET}"
+            
+            # 显示内存使用
+            MEM_USED=$(free -m | awk 'NR==2{printf "%.2f%%", $3*100/$2}')
+            echo -e "${GREEN}内存使用率: ${MEM_USED}${RESET}"
+            
+            echo -e "${GREEN}----------------------------------------${RESET}"
+            echo -e "${GREEN}连接字符串: socks5://${USERNAME}:${PASSWORD}@${IP}:${PORT}${RESET}"
+        else
+            echo -e "${RED}运行状态: 未运行${RESET}"
+            echo -e "${YELLOW}请使用 '重启服务' 选项启动服务${RESET}"
+        fi
+        
+        echo -e "${GREEN}========================================${RESET}"
     else
-        echo -e "${RED}未检测到安装记录${NC}"
+        echo -e "${RED}SOCKS5 未安装或配置文件丢失${RESET}"
     fi
 }
 
+# 重启服务
+restart_socks5() {
+    if systemctl list-unit-files | grep -q $SERVICE_NAME; then
+        systemctl restart $SERVICE_NAME
+        sleep 2
+        
+        if systemctl is-active --quiet $SERVICE_NAME; then
+            echo -e "${GREEN}SOCKS5 服务已成功重启${RESET}"
+        else
+            echo -e "${RED}SOCKS5 服务重启失败，请检查日志: $WORKDIR/socks5.log${RESET}"
+        fi
+    else
+        echo -e "${RED}SOCKS5 服务未安装${RESET}"
+    fi
+}
+
+# 查看日志
+view_logs() {
+    if [[ -f "$WORKDIR/socks5.log" ]]; then
+        echo -e "${GREEN}显示最近 50 行日志:${RESET}"
+        tail -n 50 "$WORKDIR/socks5.log"
+    else
+        echo -e "${RED}日志文件不存在${RESET}"
+    fi
+}
+
+# 修改配置
+change_config() {
+    if [[ ! -f $INFO_FILE ]]; then
+        echo -e "${RED}SOCKS5 未安装或配置文件丢失${RESET}"
+        return
+    fi
+    
+    source $INFO_FILE
+    source $CONFIG_FILE 2>/dev/null
+    
+    echo -e "${GREEN}当前配置:${RESET}"
+    echo -e "${GREEN}1. 端口: ${PORT}${RESET}"
+    echo -e "${GREEN}2. 用户名: ${USERNAME}${RESET}"
+    echo -e "${GREEN}3. 密码: ${PASSWORD}${RESET}"
+    echo -e "${GREEN}4. 最大连接数: ${MAX_CONN:-未设置}${RESET}"
+    echo -e "${GREEN}5. 返回${RESET}"
+    
+    echo -ne "${YELLOW}请选择要修改的选项: ${RESET}"
+    read config_choice
+    
+    case $config_choice in
+        1)
+            echo -ne "${YELLOW}请输入新端口 (10000-50000): ${RESET}"
+            read new_port
+            if [[ $new_port =~ ^[0-9]+$ ]] && [[ $new_port -ge 10000 ]] && [[ $new_port -le 50000 ]]; then
+                sed -i "s/PORT=.*/PORT=$new_port/" $INFO_FILE
+                sed -i "s/port = .*/port = $new_port/" $WORKDIR/socks5.py
+                echo -e "${GREEN}端口已修改为 ${new_port}${RESET}"
+                restart_socks5
+            else
+                echo -e "${RED}无效的端口号${RESET}"
+            fi
+            ;;
+        2)
+            echo -ne "${YELLOW}请输入新用户名: ${RESET}"
+            read new_username
+            if [[ -n "$new_username" ]]; then
+                sed -i "s/USERNAME=.*/USERNAME=$new_username/" $INFO_FILE
+                sed -i "s/USERNAME = .*/USERNAME = \"$new_username\"/" $WORKDIR/socks5.py
+                echo -e "${GREEN}用户名已修改为 ${new_username}${RESET}"
+                restart_socks5
+            else
+                echo -e "${RED}用户名不能为空${RESET}"
+            fi
+            ;;
+        3)
+            echo -ne "${YELLOW}请输入新密码: ${RESET}"
+            read new_password
+            if [[ -n "$new_password" ]]; then
+                sed -i "s/PASSWORD=.*/PASSWORD=$new_password/" $INFO_FILE
+                sed -i "s/PASSWORD = .*/PASSWORD = \"$new_password\"/" $WORKDIR/socks5.py
+                echo -e "${GREEN}密码已修改为 ${new_password}${RESET}"
+                restart_socks5
+            else
+                echo -e "${RED}密码不能为空${RESET}"
+            fi
+            ;;
+        4)
+            echo -ne "${YELLOW}请输入新的最大连接数: ${RESET}"
+            read new_max_conn
+            if [[ $new_max_conn =~ ^[0-9]+$ ]] && [[ $new_max_conn -gt 0 ]]; then
+                sed -i "s/MAX_CONN=.*/MAX_CONN=$new_max_conn/" $CONFIG_FILE
+                sed -i "s/MAX_CONN = .*/MAX_CONN = $new_max_conn/" $WORKDIR/socks5.py
+                echo -e "${GREEN}最大连接数已修改为 ${new_max_conn}${RESET}"
+                restart_socks5
+            else
+                echo -e "${RED}无效的连接数${RESET}"
+            fi
+            ;;
+        5)
+            return
+            ;;
+        *)
+            echo -e "${RED}无效选项${RESET}"
+            ;;
+    esac
+}
+
 # 菜单
-show_menu() {
+menu() {
     clear
-    echo -e "${GREEN}  ____   ___   ____ _  ______ ____   ${NC}"
-    echo -e "${GREEN} / ___| / _ \\ / ___| |/ / ___| ___|  ${NC}"
-    echo -e "${GREEN} \\___ \\| | | | |   | ' /\\___ \\___ \\ ${NC}"
-    echo -e "${GREEN}  ___) | |_| | |___| . \\ ___) |__) | ${NC}"
-    echo -e "${GREEN} |____/ \\___/ \\____|_|\\_\\____/____/  ${NC}"
-    echo -e "${GREEN}=====================================================${NC}"
-    echo -e "${GREEN}1. 安装 SOCKS5${NC}"
-    echo -e "${GREEN}2. 卸载 SOCKS5${NC}"
-    echo -e "${GREEN}3. 查看服务状态${NC}"
-    echo -e "${GREEN}4. 重启服务${NC}"
-    echo -e "${GREEN}5. 查看访问信息${NC}"
-    echo -e "${GREEN}6. NAT VPS 优化建议${NC}"
-    echo -e "${GREEN}7. 检测 BBR 状态${NC}"
-    echo -e "${GREEN}8. 启用 BBR${NC}"
-    echo -e "${GREEN}9. 退出${NC}"
-    echo -e "${GREEN}=====================================================${NC}"
-    echo -ne "${GREEN}请选择 [1-9]: ${NC}"
+    echo -e "${GREEN}"
+    echo "  ____   ___   ____ _  ______ ____  "
+    echo " / ___| / _ \ / ___| |/ / ___| ___| "
+    echo " \___ \| | | | |   | ' /\___ \___ \ "
+    echo "  ___) | |_| | |___| . \ ___) |__) |"
+    echo " |____/ \___/ \____|_|\_\____/____/ "
+    echo -e "       SOCKS5 代理管理面板 v2.0      "
+    echo "===================================="
+    
+    # 检查是否已安装
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        source $INFO_FILE
+        echo -e "${GREEN}状态: 运行中 - ${IP}:${PORT}${RESET}"
+    elif systemctl list-unit-files | grep -q $SERVICE_NAME; then
+        echo -e "${RED}状态: 已安装但未运行${RESET}"
+    else
+        echo -e "${YELLOW}状态: 未安装${RESET}"
+    fi
+    
+    echo "===================================="
+    echo "1. 安装 SOCKS5 代理"
+    echo "2. 卸载 SOCKS5 代理"
+    echo "3. 查看代理状态"
+    echo "4. 重启代理服务"
+    echo "5. 查看代理日志"
+    echo "6. 修改代理配置"
+    echo "7. 检测/开启 BBR"
+    echo "8. 系统优化检测"
+    echo "9. 退出"
+    echo "===================================="
+    echo -ne "${YELLOW}请输入选项: ${RESET}"
     read choice
     case $choice in
         1) install_socks5 ;;
         2) uninstall_socks5 ;;
-        3) systemctl status socks5 --no-pager ;;
-        4) systemctl restart socks5 && echo -e "${GREEN}SOCKS5 已重启${NC}" ;;
-        5) show_info ;;
-        6) optimize_nat ;;
-        7) check_bbr ;;
-        8) enable_bbr ;;
+        3) check_status ;;
+        4) restart_socks5 ;;
+        5) view_logs ;;
+        6) change_config ;;
+        7) 
+           check_bbr
+           echo -ne "${YELLOW}是否启用 BBR? (y/n): ${RESET}"
+           read yn
+           if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+               enable_bbr
+           fi
+           ;;
+        8) optimize_sysctl ;;
         9) exit 0 ;;
-        *) echo -e "${RED}无效选项，请重新选择！${NC}"; sleep 2 ;;
+        *) echo -e "${RED}无效选项${RESET}" ;;
     esac
+    echo
+    echo -ne "${GREEN}按回车键继续...${RESET}"
+    read
+    menu
 }
 
-# 主循环
-while true; do
-    show_menu
-done
+# 设置快捷命令 s5
+if [[ ! -f /usr/bin/s5 ]]; then
+    echo "#!/bin/bash" > /usr/bin/s5
+    echo "bash $0" >> /usr/bin/s5
+    chmod +x /usr/bin/s5
+fi
+
+# 检查是否为root用户
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}错误: 此脚本必须以root用户运行${RESET}"
+    exit 1
+fi
+
+# 主程序入口
+menu
