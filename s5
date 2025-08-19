@@ -3,6 +3,7 @@
 # SOCKS5 脚本 (sing-box内核版 for NAT VPS & IPv4 优先)
 # 作者: Djkyc
 # 改进: CodeBuddy
+# 版本: 1.1
 # ================================================
 
 WORKDIR="/opt/singbox"
@@ -682,26 +683,24 @@ EOF
 
 # 设置快捷命令 s
 setup_shortcut() {
-    # 创建备份脚本
-    mkdir -p $WORKDIR
+    # 复制脚本到固定位置
     cp "$(readlink -f "$0")" "$WORKDIR/singbox_socks5.sh"
     chmod +x "$WORKDIR/singbox_socks5.sh"
     
-    # 创建快捷命令 - 使用固定路径而不是变量
-    cat > /usr/bin/s <<'EOFMARKER'
+    # 创建快捷命令脚本
+    cat > /usr/bin/s <<'EOF'
 #!/bin/bash
 # 快捷命令 - SOCKS5代理管理脚本
 if [ -f "/opt/singbox/singbox_socks5.sh" ]; then
     bash "/opt/singbox/singbox_socks5.sh"
 else
     echo -e "\033[0;31m错误: 找不到SOCKS5管理脚本\033[0m"
-    echo -e "\033[0;33m尝试重新安装脚本...\033[0m"
+    echo -e "\033[0;33m请重新安装脚本\033[0m"
 fi
-EOFMARKER
+EOF
     chmod +x /usr/bin/s
     
     echo -e "${GREEN}快捷命令 's' 已设置，您可以随时输入 's' 打开此菜单${RESET}"
-    echo -e "${GREEN}已创建脚本备份: $WORKDIR/singbox_socks5.sh${RESET}"
 }
 
 # 菜单
@@ -714,7 +713,7 @@ menu() {
     echo -e "  ___) | | | | | (_| || |_) | (_) >  < "
     echo -e " |____/|_|_| |_|\__, ||____/ \___/_/\_\\"
     echo -e "                |___/                  "
-    echo -e "  SOCKS5 代理管理面板 v1.0 By:Djkyc     "
+    echo -e "  SOCKS5 代理管理面板 v1.1 By:Djkyc     "
     echo -e "     快捷命令: 输入 ${YELLOW}s${GREEN} 打开此菜单     "
     echo -e "===================================="
     
