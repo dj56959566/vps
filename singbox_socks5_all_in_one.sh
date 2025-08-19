@@ -690,9 +690,20 @@ update_script() {
     echo -e "${GREEN}正在从GitHub下载最新版本...${RESET}"
     TEMP_SCRIPT="/tmp/singbox_socks5_new.sh"
     
-    if curl -s -o "$TEMP_SCRIPT" https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5.sh; then
-        # 检查下载是否成功
-        if [[ -s "$TEMP_SCRIPT" ]]; then
+    # 尝试使用curl下载
+    if ! curl -s -o "$TEMP_SCRIPT" https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5_all_in_one.sh; then
+        # 如果curl失败，尝试使用wget
+        if ! wget -q -O "$TEMP_SCRIPT" https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5_all_in_one.sh; then
+            echo -e "${RED}下载失败，无法连接到GitHub${RESET}"
+            echo -e "${YELLOW}您可以手动下载最新版本: https://github.com/djkcyl/socks5-script${RESET}"
+            return 1
+        fi
+    fi
+    
+    # 检查下载是否成功
+    if [[ -s "$TEMP_SCRIPT" ]]; then
+        # 验证下载的文件是否为有效的bash脚本
+        if grep -q "#!/bin/bash" "$TEMP_SCRIPT"; then
             # 替换当前脚本
             cat "$TEMP_SCRIPT" > "$SCRIPT_PATH"
             chmod +x "$SCRIPT_PATH"
@@ -702,17 +713,21 @@ update_script() {
             cp "$SCRIPT_PATH" "$WORKDIR/singbox_socks5.sh"
             chmod +x "$WORKDIR/singbox_socks5.sh"
             
+            # 更新快捷命令
+            setup_shortcut
+            
             rm -f "$TEMP_SCRIPT"
             echo -e "${GREEN}脚本已更新成功！将在下次启动时生效${RESET}"
             echo -e "${GREEN}如需立即应用更新，请退出后重新运行脚本${RESET}"
         else
-            echo -e "${RED}下载的脚本内容为空，更新失败${RESET}"
+            echo -e "${RED}下载的文件不是有效的bash脚本，更新失败${RESET}"
             echo -e "${YELLOW}恢复备份中...${RESET}"
             cp "${SCRIPT_PATH}.bak" "$SCRIPT_PATH"
         fi
     else
-        echo -e "${RED}下载失败，无法连接到GitHub${RESET}"
-        echo -e "${YELLOW}您可以手动下载最新版本: https://github.com/djkcyl/socks5-script${RESET}"
+        echo -e "${RED}下载的脚本内容为空，更新失败${RESET}"
+        echo -e "${YELLOW}恢复备份中...${RESET}"
+        cp "${SCRIPT_PATH}.bak" "$SCRIPT_PATH"
     fi
 }
 
@@ -792,19 +807,42 @@ update_singbox() {
 
 # 设置快捷命令 s
 setup_shortcut() {
+    # 确保工作目录存在
+    mkdir -p "$WORKDIR"
+    
+    # 获取当前脚本的绝对路径
+    CURRENT_SCRIPT=$(readlink -f "$0")
+    
     # 复制脚本到固定位置
-    cp "$(readlink -f "$0")" "$WORKDIR/singbox_socks5.sh"
+    cp "$CURRENT_SCRIPT" "$WORKDIR/singbox_socks5.sh"
     chmod +x "$WORKDIR/singbox_socks5.sh"
     
-    # 创建快捷命令脚本
+    # 创建快捷命令脚本 - 使用绝对路径并添加错误处理
     cat > /usr/bin/s <<'EOF'
 #!/bin/bash
 # 快捷命令 - SOCKS5代理管理脚本
-if [ -f "/opt/singbox/singbox_socks5.sh" ]; then
-    bash "/opt/singbox/singbox_socks5.sh"
+SCRIPT_PATH="/opt/singbox/singbox_socks5.sh"
+
+if [ -f "$SCRIPT_PATH" ]; then
+    bash "$SCRIPT_PATH"
 else
     echo -e "\033[0;31m错误: 找不到SOCKS5管理脚本\033[0m"
-    echo -e "\033[0;33m请重新安装脚本\033[0m"
+    echo -e "\033[0;33m尝试修复中...\033[0m"
+    
+    # 尝试从当前目录查找脚本
+    CURRENT_DIR=$(pwd)
+    if [ -f "$CURRENT_DIR/singbox_socks5_all_in_one.sh" ]; then
+        echo -e "\033[0;32m找到脚本，正在修复...\033[0m"
+        mkdir -p /opt/singbox
+        cp "$CURRENT_DIR/singbox_socks5_all_in_one.sh" "$SCRIPT_PATH"
+        chmod +x "$SCRIPT_PATH"
+        echo -e "\033[0;32m修复成功，正在启动...\033[0m"
+        bash "$SCRIPT_PATH"
+    else
+        echo -e "\033[0;31m无法自动修复，请重新安装脚本\033[0m"
+        echo -e "\033[0;33m可以使用以下命令重新安装:\033[0m"
+        echo -e "\033[0;33mbash <(curl -Ls https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5_all_in_one.sh)\033[0m"
+    fi
 fi
 EOF
     chmod +x /usr/bin/s
