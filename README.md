@@ -169,4 +169,13 @@ bash <(curl -Ls https://raw.githubusercontent.com/dj56959566/vps/refs/heads/main
 5. 优化了系统参数配置
 6. 增强了错误处理和异常恢复
 7. 添加了更多管理功能
+安装后，用户可以直接输入 s 命令随时打开管理菜单。
 
+这个改进版的脚本提供了以下功能：
+
+安装/卸载 SOCKS5 代理服务
+查看代理状态和日志
+修改代理配置（端口、用户名、密码）
+系统优化和BBR加速
+DNS设置（CloudFlare DNS）
+sing-box版本更新
