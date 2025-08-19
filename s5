@@ -29,9 +29,18 @@ gen_port() {
 
 # 随机用户名密码生成
 gen_credentials() {
+    # 确保配置目录存在
+    mkdir -p $WORKDIR
+    
+    # 创建或清空配置文件
+    > $CONFIG_FILE
+    
+    # 生成随机凭据
     USERNAME=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 8)
     PASSWORD=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12)
-    echo "USERNAME=$USERNAME" > $CONFIG_FILE
+    
+    # 写入配置
+    echo "USERNAME=$USERNAME" >> $CONFIG_FILE
     echo "PASSWORD=$PASSWORD" >> $CONFIG_FILE
 }
 
@@ -133,9 +142,30 @@ enable_bbr() {
 install_dependencies() {
     echo -e "${GREEN}[安装] 正在安装必要依赖...${RESET}"
     apt-get update -y
-    apt-get install -y python3 python3-pip curl net-tools
-    pip3 install --upgrade pip
-    pip3 install pysocks
+    apt-get install -y python3 python3-pip python3-pysocks curl net-tools
+    
+    # 检查是否已安装pysocks
+    if ! python3 -c "import socks" &>/dev/null; then
+        echo -e "${YELLOW}系统不允许直接使用pip安装包，尝试创建虚拟环境...${RESET}"
+        
+        # 安装虚拟环境支持
+        apt-get install -y python3-venv python3-full
+        
+        # 创建虚拟环境
+        mkdir -p $WORKDIR
+        python3 -m venv $WORKDIR/venv
+        
+        # 在虚拟环境中安装pysocks
+        $WORKDIR/venv/bin/pip install pysocks
+        
+        # 更新Python解释器路径
+        PYTHON_PATH="$WORKDIR/venv/bin/python3"
+    else
+        PYTHON_PATH="/usr/bin/python3"
+    fi
+    
+    # 保存Python路径到配置
+    echo "PYTHON_PATH=$PYTHON_PATH" >> $CONFIG_FILE
 }
 
 # 安装 SOCKS5
@@ -394,6 +424,9 @@ if __name__ == "__main__":
         sys.exit(0)
 EOF
 
+    # 获取Python路径
+    source $CONFIG_FILE
+    
     # 创建系统服务
     cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
 [Unit]
@@ -401,7 +434,7 @@ Description=SOCKS5 Proxy Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 $WORKDIR/socks5.py
+ExecStart=${PYTHON_PATH} $WORKDIR/socks5.py
 Restart=always
 User=root
 WorkingDirectory=$WORKDIR
@@ -619,6 +652,53 @@ change_config() {
     esac
 }
 
+# 更换DNS为CloudFlare DNS
+change_dns_to_cloudflare() {
+    echo -e "${GREEN}正在更换系统DNS为CloudFlare DNS...${RESET}"
+    
+    # 备份当前的resolv.conf
+    if [[ -f /etc/resolv.conf ]]; then
+        cp /etc/resolv.conf /etc/resolv.conf.bak
+    fi
+    
+    # 写入CloudFlare DNS
+    cat > /etc/resolv.conf <<EOF
+nameserver 1.1.1.1
+nameserver 1.0.0.1
+options timeout:2 attempts:3 rotate single-request-reopen
+EOF
+    
+    # 防止自动覆盖
+    chattr +i /etc/resolv.conf 2>/dev/null
+    
+    # 检查是否成功
+    if grep -q "1.1.1.1" /etc/resolv.conf; then
+        echo -e "${GREEN}DNS已成功更换为CloudFlare DNS (1.1.1.1 和 1.0.0.1)${RESET}"
+    else
+        echo -e "${RED}DNS更换失败，请手动检查${RESET}"
+    fi
+}
+
+# 恢复原始DNS
+restore_original_dns() {
+    echo -e "${GREEN}正在恢复原始DNS设置...${RESET}"
+    
+    # 解除文件锁定
+    chattr -i /etc/resolv.conf 2>/dev/null
+    
+    # 恢复备份
+    if [[ -f /etc/resolv.conf.bak ]]; then
+        mv /etc/resolv.conf.bak /etc/resolv.conf
+        echo -e "${GREEN}已恢复原始DNS设置${RESET}"
+    else
+        echo -e "${YELLOW}未找到DNS备份，将使用默认设置${RESET}"
+        cat > /etc/resolv.conf <<EOF
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+EOF
+    fi
+}
+
 # 菜单
 menu() {
     clear
@@ -641,6 +721,15 @@ menu() {
         echo -e "${YELLOW}状态: 未安装${RESET}"
     fi
     
+    # 检查当前DNS
+    CURRENT_DNS=$(grep "nameserver" /etc/resolv.conf | head -1 | awk '{print $2}')
+    if [[ "$CURRENT_DNS" == "1.1.1.1" ]]; then
+        DNS_STATUS="${GREEN}CloudFlare DNS${RESET}"
+    else
+        DNS_STATUS="${YELLOW}系统默认 ($CURRENT_DNS)${RESET}"
+    fi
+    echo -e "当前DNS: $DNS_STATUS"
+    
     echo "===================================="
     echo "1. 安装 SOCKS5 代理"
     echo "2. 卸载 SOCKS5 代理"
@@ -650,7 +739,8 @@ menu() {
     echo "6. 修改代理配置"
     echo "7. 检测/开启 BBR"
     echo "8. 系统优化检测"
-    echo "9. 退出"
+    echo "9. 更换/恢复 DNS"
+    echo "0. 退出"
     echo "===================================="
     echo -ne "${YELLOW}请输入选项: ${RESET}"
     read choice
@@ -670,7 +760,23 @@ menu() {
            fi
            ;;
         8) optimize_sysctl ;;
-        9) exit 0 ;;
+        9) 
+           # 检查当前DNS状态
+           if grep -q "1.1.1.1" /etc/resolv.conf; then
+               echo -e "${YELLOW}当前已使用CloudFlare DNS，是否恢复原始DNS? (y/n): ${RESET}"
+               read yn
+               if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+                   restore_original_dns
+               fi
+           else
+               echo -e "${YELLOW}是否更换为CloudFlare DNS? (y/n): ${RESET}"
+               read yn
+               if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+                   change_dns_to_cloudflare
+               fi
+           fi
+           ;;
+        0) exit 0 ;;
         *) echo -e "${RED}无效选项${RESET}" ;;
     esac
     echo
