@@ -104,7 +104,10 @@ bash <(curl -Ls IP.Check.Place)
 
 ```bash
 # 下载脚本
-wget -O socks5.sh https://raw.githubusercontent.com/dj56959566/vps/refs/heads/main/s5
+bash <(curl -Ls https://raw.githubusercontent.com/dj56959566/vps/refs/heads/main/s5)
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/dj56959566/vps/refs/heads/main/s5)
 
 # 添加执行权限
 chmod +x singbox_socks5.sh
