@@ -3,7 +3,7 @@
 # SOCKS5 脚本 (sing-box内核版 for NAT VPS & IPv4 优先)
 # 作者: Djkyc
 # 改进: CodeBuddy
-# 版本: 1.2 (All-in-One版本)
+# 版本: 1.3 (NAT VPS 优化版)
 # ================================================
 
 WORKDIR="/opt/singbox"
@@ -17,6 +17,52 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 RESET="\033[0m"
 
+# ================================================
+# 系统资源检测与优化
+# ================================================
+
+# 检测系统资源
+check_system_resources() {
+    echo -e "${GREEN}[系统检测] 正在检测系统资源...${RESET}"
+    
+    # 检测内存
+    MEM_TOTAL=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    MEM_FREE=$(awk '/MemFree/ {print $2}' /proc/meminfo)
+    MEM_AVAILABLE=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo $MEM_FREE)
+    MEM_TOTAL_MB=$((MEM_TOTAL/1024))
+    MEM_AVAILABLE_MB=$((MEM_AVAILABLE/1024))
+    
+    # 检测CPU
+    CPU_CORES=$(grep -c processor /proc/cpuinfo)
+    CPU_MODEL=$(grep "model name" /proc/cpuinfo | head -n 1 | cut -d ':' -f 2 | sed 's/^[ \t]*//')
+    
+    # 检测磁盘
+    DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
+    DISK_AVAIL=$(df -h / | awk 'NR==2 {print $4}')
+    
+    # 检测系统负载
+    LOAD=$(cat /proc/loadavg | awk '{print $1,$2,$3}')
+    
+    echo -e "${GREEN}[系统信息]${RESET}"
+    echo -e "${GREEN}CPU: ${CPU_CORES}核 (${CPU_MODEL})${RESET}"
+    echo -e "${GREEN}内存: 总计${MEM_TOTAL_MB}MB, 可用${MEM_AVAILABLE_MB}MB${RESET}"
+    echo -e "${GREEN}磁盘: 总计${DISK_TOTAL}, 可用${DISK_AVAIL}${RESET}"
+    echo -e "${GREEN}系统负载: ${LOAD}${RESET}"
+    
+    # 内存不足警告
+    if [ $MEM_TOTAL_MB -lt 512 ]; then
+        echo -e "${YELLOW}[警告] 检测到系统内存较低 (${MEM_TOTAL_MB}MB)${RESET}"
+        echo -e "${YELLOW}将采用低内存模式安装，减少资源占用${RESET}"
+        LOW_MEM_MODE=1
+    else
+        LOW_MEM_MODE=0
+    fi
+    
+    # 返回低内存模式标志
+    return $LOW_MEM_MODE
+}
+
+# 创建工作目录
 mkdir -p $WORKDIR
 
 # ================================================
@@ -53,15 +99,25 @@ gen_credentials() {
 
 # 检测 IPv4 优先
 get_public_ip() {
+    echo -e "${GREEN}[网络] 正在获取公网IP...${RESET}"
+    
+    # 先尝试IPv4
     IPv4=$(curl -4 -s --connect-timeout 5 https://ipv4.icanhazip.com || curl -4 -s --connect-timeout 5 https://api.ipify.org)
-    IPv6=$(curl -6 -s --connect-timeout 5 https://ipv6.icanhazip.com || curl -6 -s --connect-timeout 5 https://api64.ipify.org)
-    if [[ -n "$IPv4" ]]; then
-        echo "$IPv4"
-    elif [[ -n "$IPv6" ]]; then
-        echo "$IPv6"
+    
+    # 如果IPv4获取失败，再尝试IPv6
+    if [[ -z "$IPv4" ]]; then
+        echo -e "${YELLOW}[网络] IPv4获取失败，尝试IPv6...${RESET}"
+        IPv6=$(curl -6 -s --connect-timeout 5 https://ipv6.icanhazip.com || curl -6 -s --connect-timeout 5 https://api64.ipify.org)
+        if [[ -n "$IPv6" ]]; then
+            echo -e "${GREEN}[网络] 获取到IPv6地址: ${IPv6}${RESET}"
+            echo "$IPv6"
+        else
+            echo -e "${RED}[错误] 无法获取公网IP${RESET}"
+            return 1
+        fi
     else
-        echo "无法获取公网IP"
-        return 1
+        echo -e "${GREEN}[网络] 获取到IPv4地址: ${IPv4}${RESET}"
+        echo "$IPv4"
     fi
 }
 
@@ -71,47 +127,54 @@ get_public_ip() {
 
 # 检测 NAT VPS 内存/CPU，推荐并发配置
 optimize_sysctl() {
+    echo -e "${GREEN}[系统优化] 正在根据系统资源优化网络参数...${RESET}"
+    
     MEM=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
     CPU_CORES=$(grep -c processor /proc/cpuinfo)
     
     # 根据内存和CPU核心数优化并发连接数
     if [[ $MEM -lt 65536 ]]; then
-        MAX_CONN=50
-        RECOMMEND="建议并发 < 50"
+        MAX_CONN=30
+        RECOMMEND="建议并发 < 30"
     elif [[ $MEM -lt 131072 ]]; then
-        MAX_CONN=100
-        RECOMMEND="建议并发 < 100"
+        MAX_CONN=80
+        RECOMMEND="建议并发 < 80"
     elif [[ $MEM -lt 262144 ]]; then
-        MAX_CONN=200
-        RECOMMEND="建议并发 < 200"
+        MAX_CONN=150
+        RECOMMEND="建议并发 < 150"
     else
-        MAX_CONN=500
-        RECOMMEND="建议并发 < 500"
+        MAX_CONN=300
+        RECOMMEND="建议并发 < 300"
     fi
     
-    # 系统参数优化
+    # 系统参数优化 - 针对小内存VPS调整参数
     cat > /etc/sysctl.d/99-singbox-optimize.conf <<EOF
 # 增加打开文件数限制
-fs.file-max = 65535
+fs.file-max = 51200
 
-# 网络栈优化
-net.core.somaxconn = 4096
-net.core.netdev_max_backlog = 10000
-net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.tcp_fin_timeout = 30
+# 网络栈优化 - 针对小内存VPS调整
+net.core.somaxconn = 2048
+net.core.netdev_max_backlog = 1000
+net.ipv4.tcp_max_syn_backlog = 1024
+net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_intvl = 30
-net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_probes = 3
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.ip_local_port_range = 1024 65000
+net.ipv4.ip_local_port_range = 10000 65000
+
+# 内存优化
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
 EOF
 
-    sysctl -p /etc/sysctl.d/99-singbox-optimize.conf
+    # 应用系统参数 - 使用安静模式避免大量输出
+    sysctl -q -p /etc/sysctl.d/99-singbox-optimize.conf
     
     # 设置系统最大打开文件数
-    if ! grep -q "* soft nofile 65535" /etc/security/limits.conf; then
-        echo "* soft nofile 65535" >> /etc/security/limits.conf
-        echo "* hard nofile 65535" >> /etc/security/limits.conf
+    if ! grep -q "* soft nofile 51200" /etc/security/limits.conf; then
+        echo "* soft nofile 51200" >> /etc/security/limits.conf
+        echo "* hard nofile 51200" >> /etc/security/limits.conf
     fi
     
     echo -e "${GREEN}[系统优化] 内存: $((MEM/1024))MB, CPU: ${CPU_CORES}核, ${RECOMMEND}${RESET}"
@@ -141,7 +204,7 @@ enable_bbr() {
     
     echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    sysctl -p
+    sysctl -p > /dev/null 2>&1
     
     if lsmod | grep -q bbr; then
         echo -e "${GREEN}BBR 已成功启用${RESET}"
@@ -265,14 +328,38 @@ EOF
 # sing-box 安装与管理
 # ================================================
 
-# 安装依赖
+# 安装依赖 - 分步安装以减少内存占用
 install_dependencies() {
-    echo -e "${GREEN}[安装] 正在安装必要依赖...${RESET}"
-    apt-get update -y
-    apt-get install -y curl wget unzip net-tools dnsutils
+    echo -e "${GREEN}[安装] 正在检查并安装必要依赖...${RESET}"
+    
+    # 检查是否为低内存模式
+    check_system_resources
+    LOW_MEM_MODE=$?
+    
+    # 更新软件源索引 - 使用安静模式减少输出
+    echo -e "${GREEN}[安装] 更新软件源...${RESET}"
+    apt-get update -qq
+    
+    # 分步安装依赖，每次安装一个包以减少内存占用
+    echo -e "${GREEN}[安装] 安装curl...${RESET}"
+    apt-get install -y curl
+    
+    echo -e "${GREEN}[安装] 安装wget...${RESET}"
+    apt-get install -y wget
+    
+    echo -e "${GREEN}[安装] 安装unzip...${RESET}"
+    apt-get install -y unzip
+    
+    echo -e "${GREEN}[安装] 安装net-tools...${RESET}"
+    apt-get install -y net-tools
+    
+    echo -e "${GREEN}[安装] 安装dnsutils...${RESET}"
+    apt-get install -y dnsutils
+    
+    echo -e "${GREEN}[安装] 所有依赖安装完成${RESET}"
 }
 
-# 下载并安装sing-box
+# 下载并安装sing-box - 优化下载过程
 download_singbox() {
     echo -e "${GREEN}[安装] 正在下载sing-box...${RESET}"
     
@@ -294,18 +381,31 @@ download_singbox() {
             ;;
     esac
     
-    # 下载sing-box
-    DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz"
-    wget -O /tmp/sing-box.tar.gz $DOWNLOAD_URL
+    # 创建临时目录
+    mkdir -p $WORKDIR/bin
     
-    if [ $? -ne 0 ]; then
+    # 下载sing-box - 使用进度条显示下载进度
+    DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-${ARCH}.tar.gz"
+    echo -e "${GREEN}[下载] 从 ${DOWNLOAD_URL} 下载...${RESET}"
+    
+    # 使用wget显示进度条，但减少其他输出
+    if ! wget --progress=bar:force -O /tmp/sing-box.tar.gz $DOWNLOAD_URL 2>&1; then
         echo -e "${RED}下载sing-box失败，请检查网络连接或版本号${RESET}"
-        return 1
+        echo -e "${YELLOW}尝试备用下载方法...${RESET}"
+        
+        # 备用下载方法 - 使用curl
+        if ! curl -L --progress-bar -o /tmp/sing-box.tar.gz $DOWNLOAD_URL; then
+            echo -e "${RED}备用下载也失败，无法继续安装${RESET}"
+            return 1
+        fi
     fi
     
-    # 解压并安装
-    mkdir -p $WORKDIR/bin
+    echo -e "${GREEN}[安装] 下载完成，正在解压...${RESET}"
+    
+    # 解压并安装 - 使用安静模式减少输出
     tar -xzf /tmp/sing-box.tar.gz -C /tmp
+    
+    # 移动二进制文件
     mv /tmp/sing-box-${SINGBOX_VERSION}-linux-${ARCH}/sing-box $WORKDIR/bin/
     chmod +x $WORKDIR/bin/sing-box
     
@@ -313,7 +413,7 @@ download_singbox() {
     rm -rf /tmp/sing-box.tar.gz /tmp/sing-box-${SINGBOX_VERSION}-linux-${ARCH}
     
     # 验证安装
-    if [ -f "$WORKDIR/bin/sing-box" ]; then
+    if [ -f "$WORKDIR/bin/sing-box" ]; 键，然后
         echo -e "${GREEN}sing-box 安装成功${RESET}"
         return 0
     else
@@ -328,7 +428,52 @@ create_singbox_config() {
     USERNAME=$2
     PASSWORD=$3
     
-    cat > $SINGBOX_CONFIG <<EOF
+    # 检查是否为低内存模式
+    check_system_resources
+    LOW_MEM_MODE=$?
+    
+    # 根据内存情况调整配置
+    if [ $LOW_MEM_MODE -eq 1 ]; then
+        # 低内存模式配置 - 减少缓冲区大小和并发连接
+        cat > $SINGBOX_CONFIG <<EOF
+{
+  "log": {
+    "level": "error",
+    "timestamp": true,
+    "disabled": false
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "::",
+      "listen_port": $PORT,
+      "users": [
+        {
+          "username": "$USERNAME",
+          "password": "$PASSWORD"
+        }
+      ],
+      "sniff": false,
+      "sniff_override_destination": false
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "experimental": {
+    "cache_file": {
+      "enabled": false
+    }
+  }
+}
+EOF
+    else
+        # 正常模式配置
+        cat > $SINGBOX_CONFIG <<EOF
 {
   "log": {
     "level": "info",
@@ -358,9 +503,10 @@ create_singbox_config() {
   ]
 }
 EOF
+    fi
 }
 
-# 安装 SOCKS5
+# 安装 SOCKS5 - 优化安装流程
 install_socks5() {
     # 检查是否已安装
     if systemctl is-active --quiet $SERVICE_NAME; then
@@ -368,6 +514,11 @@ install_socks5() {
         return
     fi
     
+    # 检测系统资源
+    check_system_resources
+    LOW_MEM_MODE=$?
+    
+    # 安装依赖
     install_dependencies
     
     # 下载并安装sing-box
@@ -419,8 +570,10 @@ install_socks5() {
     # 创建sing-box配置
     create_singbox_config $PORT $USERNAME $PASSWORD
     
-    # 创建系统服务
-    cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+    # 创建系统服务 - 根据内存情况调整服务配置
+    if [ $LOW_MEM_MODE -eq 1 ]; then
+        # 低内存模式服务配置
+        cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
 [Unit]
 Description=sing-box Service
 Documentation=https://sing-box.sagernet.org
@@ -430,19 +583,50 @@ After=network.target nss-lookup.target
 ExecStart=$WORKDIR/bin/sing-box run -c $SINGBOX_CONFIG
 Restart=on-failure
 RestartSec=10s
-LimitNOFILE=infinity
+LimitNOFILE=51200
+# 低内存模式资源限制
+MemoryLimit=64M
+CPUQuota=30%
 
 [Install]
 WantedBy=multi-user.target
 EOF
+    else
+        # 正常模式服务配置
+        cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+[Unit]
+Description=sing-box Service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
 
+[Service]
+ExecStart=$WORKDIR/bin/sing-box run -c $SINGBOX_CONFIG
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=51200
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
+    echo -e "${GREEN}[安装] 正在启动服务...${RESET}"
+    
     # 启动服务
     systemctl daemon-reload
     systemctl enable $SERVICE_NAME
     systemctl restart $SERVICE_NAME
     
-    # 等待服务启动
-    sleep 2
+    # 等待服务启动 - 增加超时检测
+    echo -e "${GREEN}[安装] 等待服务启动...${RESET}"
+    for i in {1..10}; do
+        if systemctl is-active --quiet $SERVICE_NAME; then
+            break
+        fi
+        echo -n "."
+        sleep 1
+    done
+    echo ""
     
     # 检查服务状态
     if systemctl is-active --quiet $SERVICE_NAME; then
@@ -498,7 +682,7 @@ uninstall_socks5() {
     echo -e "${GREEN}sing-box 已完全卸载${RESET}"
 }
 
-# 查看状态
+# 查看状态 - 优化状态显示
 check_status() {
     if [[ -f $INFO_FILE ]]; then
         # 使用安全的方式读取配置文件
@@ -528,23 +712,25 @@ check_status() {
             echo -e "${GREEN}安装日期: ${INSTALL_DATE:-未知}${RESET}"
             
             # 显示sing-box版本
-            CURRENT_VERSION=$($WORKDIR/bin/sing-box version | grep "sing-box version" | awk '{print $3}')
-            echo -e "${GREEN}sing-box 版本: ${CURRENT_VERSION}${RESET}"
+            if [[ -f "$WORKDIR/bin/sing-box" ]]; then
+                CURRENT_VERSION=$($WORKDIR/bin/sing-box version 2>/dev/null | grep "sing-box version" | awk '{print $3}')
+                echo -e "${GREEN}sing-box 版本: ${CURRENT_VERSION:-未知}${RESET}"
+            fi
             
-            # 显示系统负载
-            LOAD=$(uptime | awk -F'load average:' '{print $2}' | sed 's/,//g')
+            # 显示系统负载 - 使用更安全的方式获取
+            LOAD=$(uptime | awk -F'load average:' '{print $2}' | sed 's/,//g' 2>/dev/null || echo "未知")
             echo -e "${GREEN}系统负载: ${LOAD}${RESET}"
             
-            # 显示内存使用
-            MEM_USED=$(free -m | awk 'NR==2{printf "%.2f%%", $3*100/$2}')
+            # 显示内存使用 - 使用更安全的方式计算
+            MEM_USED=$(free -m | awk 'NR==2{printf "%.1f%%", $3*100/$2}' 2>/dev/null || echo "未知")
             echo -e "${GREEN}内存使用率: ${MEM_USED}${RESET}"
             
             # 显示当前DNS
-            if grep -q "nameserver 1.1.1.1" /etc/resolv.conf; then
+            if grep -q "nameserver 1.1.1.1" /etc/resolv.conf 2>/dev/null; then
                 echo -e "${GREEN}当前DNS: CloudFlare DNS${RESET}"
-            elif grep -q "nameserver 8.8.8.8" /etc/resolv.conf; then
+            elif grep -q "nameserver 8.8.8.8" /etc/resolv.conf 2>/dev/null; then
                 echo -e "${GREEN}当前DNS: Google DNS${RESET}"
-            elif grep -q "nameserver 127.0.0.53" /etc/resolv.conf; then
+            elif grep -q "nameserver 127.0.0.53" /etc/resolv.conf 2>/dev/null; then
                 echo -e "${GREEN}当前DNS: 系统默认 (127.0.0.53)${RESET}"
             else
                 echo -e "${GREEN}当前DNS: 其他${RESET}"
@@ -563,11 +749,21 @@ check_status() {
     fi
 }
 
-# 重启服务
+# 重启服务 - 优化重启过程
 restart_socks5() {
     if systemctl list-unit-files | grep -q $SERVICE_NAME; then
+        echo -e "${GREEN}正在重启 sing-box 服务...${RESET}"
         systemctl restart $SERVICE_NAME
-        sleep 2
+        
+        # 等待服务启动 - 增加超时检测
+        for i in {1..5}; do
+            if systemctl is-active --quiet $SERVICE_NAME; then
+                break
+            fi
+            echo -n "."
+            sleep 1
+        done
+        echo ""
         
         if systemctl is-active --quiet $SERVICE_NAME; then
             echo -e "${GREEN}sing-box 服务已成功重启${RESET}"
@@ -579,13 +775,21 @@ restart_socks5() {
     fi
 }
 
-# 查看日志
+# 查看日志 - 优化日志显示
 view_logs() {
     echo -e "${GREEN}显示最近 50 行日志:${RESET}"
+    
+    # 检查服务是否存在
+    if ! systemctl list-unit-files | grep -q $SERVICE_NAME; then
+        echo -e "${RED}sing-box 服务未安装${RESET}"
+        return
+    fi
+    
+    # 使用安静模式显示日志
     journalctl -u $SERVICE_NAME -n 50 --no-pager
 }
 
-# 修改配置
+# 修改配置 - 优化配置修改流程
 change_config() {
     if [[ ! -f $INFO_FILE ]]; then
         echo -e "${RED}sing-box 未安装或配置文件丢失${RESET}"
@@ -675,7 +879,7 @@ change_config() {
 # 更新功能
 # ================================================
 
-# 更新脚本
+# 更新脚本 - 优化更新流程
 update_script() {
     echo -e "${GREEN}正在检查脚本更新...${RESET}"
     
@@ -690,10 +894,10 @@ update_script() {
     echo -e "${GREEN}正在从GitHub下载最新版本...${RESET}"
     TEMP_SCRIPT="/tmp/singbox_socks5_new.sh"
     
-    # 尝试使用curl下载
-    if ! curl -s -o "$TEMP_SCRIPT" https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5_all_in_one.sh; then
+    # 尝试使用curl下载 - 使用低资源模式
+    if ! curl -s -L --connect-timeout 10 -o "$TEMP_SCRIPT" https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5_all_in_one.sh; then
         # 如果curl失败，尝试使用wget
-        if ! wget -q -O "$TEMP_SCRIPT" https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5_all_in_one.sh; then
+        if ! wget -q --timeout=10 -O "$TEMP_SCRIPT" https://raw.githubusercontent.com/djkcyl/socks5-script/main/singbox_socks5_all_in_one.sh; then
             echo -e "${RED}下载失败，无法连接到GitHub${RESET}"
             echo -e "${YELLOW}您可以手动下载最新版本: https://github.com/djkcyl/socks5-script${RESET}"
             return 1
@@ -731,21 +935,22 @@ update_script() {
     fi
 }
 
-# 更新sing-box
+# 更新sing-box - 优化更新流程
 update_singbox() {
     echo -e "${GREEN}正在检查sing-box更新...${RESET}"
     
     # 获取当前版本
     if [[ -f "$WORKDIR/bin/sing-box" ]]; then
-        CURRENT_VERSION=$($WORKDIR/bin/sing-box version | grep "sing-box version" | awk '{print $3}')
+        CURRENT_VERSION=$($WORKDIR/bin/sing-box version 2>/dev/null | grep "sing-box version" | awk '{print $3}')
         echo -e "${GREEN}当前版本: ${CURRENT_VERSION}${RESET}"
     else
         echo -e "${RED}sing-box未安装${RESET}"
         return
     fi
     
-    # 获取最新版本
-    LATEST_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": "v[^"]*' | cut -d'"' -f4 | cut -c 2-)
+    # 获取最新版本 - 使用低资源模式
+    echo -e "${GREEN}正在获取最新版本信息...${RESET}"
+    LATEST_VERSION=$(curl -s --connect-timeout 10 https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": "v[^"]*' | cut -d'"' -f4 | cut -c 2-)
     
     if [[ -z "$LATEST_VERSION" ]]; then
         echo -e "${RED}无法获取最新版本信息${RESET}"
@@ -769,6 +974,7 @@ update_singbox() {
     fi
     
     # 停止服务
+    echo -e "${GREEN}停止服务...${RESET}"
     systemctl stop $SERVICE_NAME
     
     # 备份当前配置
@@ -788,6 +994,7 @@ update_singbox() {
     fi
     
     # 启动服务
+    echo -e "${GREEN}启动服务...${RESET}"
     systemctl start $SERVICE_NAME
     
     # 检查服务状态
@@ -854,7 +1061,7 @@ EOF
 # 主菜单
 # ================================================
 
-# 菜单
+# 菜单 - 优化显示
 menu() {
     clear
     echo -e "${GREEN}"
@@ -864,31 +1071,49 @@ menu() {
     echo -e "  ___) | | | | | (_| || |_) | (_) >  < "
     echo -e " |____/|_|_| |_|\__, ||____/ \___/_/\_\\"
     echo -e "                |___/                  "
-    echo -e "  SOCKS5 代理管理面板 v1.2 (All-in-One) "
+    echo -e "  SOCKS5 代理管理面板 v1.3 (NAT VPS 优化版) "
     echo -e "     快捷命令: 输入 ${YELLOW}s${GREEN} 打开此菜单     "
     echo -e "===================================="
+    
+    # 检查系统资源
+    check_system_resources
+    LOW_MEM_MODE=$?
     
     # 检查是否已安装
     if systemctl is-active --quiet $SERVICE_NAME; then
         # 使用安全的方式读取配置文件
-        IP=$(grep "^IP=" $INFO_FILE | cut -d= -f2)
-        PORT=$(grep "^PORT=" $INFO_FILE | cut -d= -f2)
-        echo -e "${GREEN}状态: 运行中 - ${IP}:${PORT}${RESET}"
+        if [[ -f $INFO_FILE ]]; then
+            IP=$(grep "^IP=" $INFO_FILE | cut -d= -f2)
+            PORT=$(grep "^PORT=" $INFO_FILE | cut -d= -f2)
+            echo -e "${GREEN}状态: 运行中 - ${IP}:${PORT}${RESET}"
+        else
+            echo -e "${GREEN}状态: 运行中${RESET}"
+        fi
         
         # 显示当前DNS
-        if grep -q "nameserver 1.1.1.1" /etc/resolv.conf; then
+        if grep -q "nameserver 1.1.1.1" /etc/resolv.conf 2>/dev/null; then
             echo -e "${GREEN}当前DNS: CloudFlare DNS${RESET}"
-        elif grep -q "nameserver 8.8.8.8" /etc/resolv.conf; then
+        elif grep -q "nameserver 8.8.8.8" /etc/resolv.conf 2>/dev/null; then
             echo -e "${GREEN}当前DNS: Google DNS${RESET}"
-        elif grep -q "nameserver 127.0.0.53" /etc/resolv.conf; then
+        elif grep -q "nameserver 127.0.0.53" /etc/resolv.conf 2>/dev/null; then
             echo -e "${GREEN}当前DNS: 系统默认 (127.0.0.53)${RESET}"
         else
             echo -e "${GREEN}当前DNS: 其他${RESET}"
+        fi
+        
+        # 显示内存模式
+        if [ $LOW_MEM_MODE -eq 1 ]; then
+            echo -e "${YELLOW}运行模式: 低内存模式${RESET}"
         fi
     elif systemctl list-unit-files | grep -q $SERVICE_NAME; then
         echo -e "${RED}状态: 已安装但未运行${RESET}"
     else
         echo -e "${YELLOW}状态: 未安装${RESET}"
+        
+        # 显示内存模式
+        if [ $LOW_MEM_MODE -eq 1 ]; then
+            echo -e "${YELLOW}安装模式: 将使用低内存模式${RESET}"
+        fi
     fi
     
     echo "===================================="
@@ -937,11 +1162,11 @@ dns_menu() {
     echo -e "===================================="
     
     # 显示当前DNS
-    if grep -q "nameserver 1.1.1.1" /etc/resolv.conf; then
+    if grep -q "nameserver 1.1.1.1" /etc/resolv.conf 2>/dev/null; then
         echo -e "${GREEN}当前DNS: CloudFlare DNS${RESET}"
-    elif grep -q "nameserver 8.8.8.8" /etc/resolv.conf; then
+    elif grep -q "nameserver 8.8.8.8" /etc/resolv.conf 2>/dev/null; then
         echo -e "${GREEN}当前DNS: Google DNS${RESET}"
-    elif grep -q "nameserver 127.0.0.53" /etc/resolv.conf; then
+    elif grep -q "nameserver 127.0.0.53" /etc/resolv.conf 2>/dev/null; then
         echo -e "${GREEN}当前DNS: 系统默认 (127.0.0.53)${RESET}"
     else
         echo -e "${GREEN}当前DNS: 其他${RESET}"
