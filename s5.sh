@@ -2,7 +2,7 @@
 # ================================================
 # SOCKS5 脚本 (sing-box内核版 for NAT VPS & IPv4 优先)
 # 作者: Djkyc
-# 版本: 1.0
+# 版本: 1.1
 # ================================================
 
 WORKDIR="/opt/singbox"
@@ -14,6 +14,7 @@ SINGBOX_VERSION="1.7.0" # 可以根据需要更新版本
 GREEN="\033[0;32m"
 YELLOW="\033[0;33m"
 RED="\033[0;31m"
+BLUE="\033[0;34m"
 RESET="\033[0m"
 
 mkdir -p $WORKDIR
@@ -58,6 +59,17 @@ get_public_ip() {
         echo "无法获取公网IP"
         return 1
     fi
+}
+
+# 生成Telegram URL
+generate_telegram_url() {
+    local ip=$1
+    local port=$2
+    local username=$3
+    local password=$4
+    
+    # 生成Telegram代理URL (使用https://t.me/socks格式)
+    echo "https://t.me/socks?server=${ip}&port=${port}&user=${username}&pass=${password}"
 }
 
 # 检测 NAT VPS 内存/CPU，推荐并发配置
@@ -144,7 +156,7 @@ enable_bbr() {
 install_dependencies() {
     echo -e "${GREEN}[安装] 正在安装必要依赖...${RESET}"
     apt-get update -y
-    apt-get install -y curl wget unzip net-tools
+    apt-get install -y curl wget unzip net-tools xxd
 }
 
 # 下载并安装sing-box
@@ -329,6 +341,9 @@ EOF
         echo "PASSWORD=$PASSWORD" >> $INFO_FILE
         echo "INSTALL_DATE=\"$(date '+%Y-%m-%d %H:%M:%S')\"" >> $INFO_FILE
         
+        # 生成Telegram URL
+        TELEGRAM_URL=$(generate_telegram_url "$PUBIP" "$PORT" "$USERNAME" "$PASSWORD")
+        
         echo -e "${GREEN}========================================${RESET}"
         echo -e "${GREEN}SOCKS5 代理安装成功!${RESET}"
         echo -e "${GREEN}----------------------------------------${RESET}"
@@ -338,6 +353,9 @@ EOF
         echo -e "${GREEN}密码: ${PASSWORD}${RESET}"
         echo -e "${GREEN}----------------------------------------${RESET}"
         echo -e "${GREEN}连接字符串: socks5://${USERNAME}:${PASSWORD}@${PUBIP}:${PORT}${RESET}"
+        echo -e "${GREEN}----------------------------------------${RESET}"
+        echo -e "${BLUE}Telegram 代理链接:${RESET}"
+        echo -e "${BLUE}${TELEGRAM_URL}${RESET}"
         echo -e "${GREEN}----------------------------------------${RESET}"
         echo -e "${GREEN}快捷命令: 输入 ${YELLOW}s${GREEN} 可随时打开此管理菜单${RESET}"
         echo -e "${GREEN}========================================${RESET}"
@@ -416,6 +434,12 @@ check_status() {
             
             echo -e "${GREEN}----------------------------------------${RESET}"
             echo -e "${GREEN}连接字符串: socks5://${USERNAME}:${PASSWORD}@${IP}:${PORT}${RESET}"
+            echo -e "${GREEN}----------------------------------------${RESET}"
+            
+            # 生成并显示Telegram URL
+            TELEGRAM_URL=$(generate_telegram_url "$IP" "$PORT" "$USERNAME" "$PASSWORD")
+            echo -e "${BLUE}Telegram 代理链接:${RESET}"
+            echo -e "${BLUE}${TELEGRAM_URL}${RESET}"
         else
             echo -e "${RED}运行状态: 未运行${RESET}"
             echo -e "${YELLOW}请使用 '重启服务' 选项启动服务${RESET}"
